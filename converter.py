@@ -6,7 +6,7 @@ import datetime
 import secrets
 import html
 
-
+# LOADING JSON INTO "DATA" VARIABLE -----------------------------------
 # Name file should be in command line
 if len(sys.argv) < 2:
 	print("You need to add the input json as an argument.")
@@ -16,13 +16,15 @@ if len(sys.argv) < 2:
 with open(sys.argv[1], 'r', encoding='UTF8') as jsonFile:
 	data = json.loads(jsonFile.read())
 
+
+# SETTING DEFAULT VARIABLES --------------------------------------------------
 # Time delay in second for chat, to sync with video. For me, 7s looks like it's in sync with what the video display
 delta = 7
 # Duration of display of the line
 duration = 10
-# Size of the font. Supposed to be in percent of standart, but it looks like all sizes aren't available
+# Size of the font. Supposed to be in percent of standard, but it looks like all sizes aren't available
 size = 10
-# Bacground color. The standart of YT is solid black
+# Background color. The YT standard is solid black
 background_color = "#000000"
 # Opacity of the background color. Between 0 and 254. 254 means that the color is not transparent
 background_opacity = 200
@@ -31,11 +33,12 @@ middle = '</head><body>'
 footer = '</body></timedtext>'
 spacer = '<s p="1">​\n​</s>'
 
+# FORMATTING AND PREPARING COMMENTS FOR PRINTING ------------------------------
 output = ''
-texts = []
+texts = [] # Holds the entire line that will be printed
 timestamps = []
 colors = ["#000000", "#FEFEFE"]
-users = ["yt-bug", "white-text"]
+users = ["yt-bug", "white-text"] # List of users to keep track of what display names have been seen
 for i in data['comments']:
 	display_name = i['commenter']['display_name']
 	message = i['message']['body']
@@ -58,13 +61,15 @@ for i in data['comments']:
 	timestamps.append([i['content_offset_seconds']+delta, True])
 	timestamps.append([i['content_offset_seconds']+delta+duration, False])
 
-
+# IDK BRO ----------------------------------------
 lengthColors = len(colors)
 for i in range(lengthColors):
 	header += '<pen id="'+str(i)+'" sz="'+str(size)+'" fc="'+colors[i]+'" fo="254" bc="'+background_color+'" bo="'+str(background_opacity)+'" />'
 
 timestamps.sort(key=lambda x: x[0])
 
+
+# COMBINING COMMENTS FOR PRINTING TO FILE ------------------
 start = 0
 end = 1
 length = len(timestamps)
@@ -87,6 +92,7 @@ for i in range(1,length):
 		start += 1
 
 
+# WRITING TO OUTPUT FILE -----------------------
 if len(sys.argv) == 3:
 	with open(sys.argv[2], 'w', encoding='UTF8') as outputFile:
 		outputFile.write(header+middle+output+footer)
