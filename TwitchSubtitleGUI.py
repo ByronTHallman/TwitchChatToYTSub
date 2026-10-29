@@ -1,21 +1,29 @@
 import customtkinter
+import tkinter
 import json
+import random
 from tkinter import filedialog, messagebox
 from pathlib import Path
 
 #--------------------------------------------------------------------------
 #Startup Stuff
-customtkinter.set_appearance_mode("System")
+customtkinter.set_appearance_mode("dark")
 customtkinter.set_default_color_theme("dark-blue")
 
 app = customtkinter.CTk()  # creates the window
 app.geometry("1000x800")
+app.resizable(False, False) #The timelines sorta break if the window is resizable.
 app.title("idk bro")
 
 jsonData = [] #List of dictionaries. "path", "name", "endTime"
 currentJson = -1 #The index of the current JSON in jsonData
-sectionList = [] #List of dictionaries. "json", "start", "end", "button"
+sectionList = [] #List of dictionaries. "json", "start", "end", "button", "ogIndex", "color"
 currentSection = -1 #The index of the current section in sectionList
+colors = [ #Some hand-picked OKLCH colors
+    "#973c5d", "#964601", "#4c6c01", "#04733a",
+    "#007078", "#0164a3", "#5c52a3", "#824387"
+]
+lastColor = "#000000" #The last used color so we don't use it again
 
 #--------------------------------------------------------------------------
 #Keyboard Input
@@ -25,10 +33,12 @@ def KeyPress(event): #No switch statement cus I don't want to mess with python v
         if currentSection > 0:
             SwapSections(currentSection, currentSection - 1)
             currentSection = currentSection - 1
+            RedrawTimelines()
     elif event.keysym == "Down":
         if currentSection < len(sectionList) - 1:
             SwapSections(currentSection, currentSection + 1)
             currentSection = currentSection + 1
+            RedrawTimelines()
     elif event.keysym == "Delete":
         if isinstance(app.focus_get(), customtkinter.CTkEntry):
             return  # Let the entry handle Delete normally
@@ -75,6 +85,9 @@ def SelectJson(index):
     return
 
 def CreateSection():
+    if currentJson == -1:
+        return
+
     hourS = int(hourStart.get() or "0") #or "0" for when text entry is left empty
     minS = int(minStart.get() or "0")
     secS = int(secStart.get() or "0")
@@ -88,14 +101,17 @@ def CreateSection():
     if not ValidTime(start, end):
         return
 
+    color = GenerateColor()
     sectionButton = customtkinter.CTkButton(
         master=sectionEditor,
         text=str(len(sectionList)) + " - " + jsonData[currentJson]["name"] + "\n" + SecToString(start) + " - " + SecToString(end),
-        command=lambda index=len(sectionList): SelectSection(index),
+        command=lambda index=len(sectionList): SelectSection(index)
     )
-    sectionList.append({"json":currentJson, "start":start, "end":end, "button":sectionButton})
+    sectionButton.configure(fg_color = color, hover = False)
+    sectionList.append({"json":currentJson, "start":start, "end":end, "button":sectionButton, "ogIndex":len(sectionList), "color":color})
     sectionButton.grid(row=len(sectionList), column=0, padx=5, pady=5, sticky="nsew")
     SelectSection(len(sectionList))
+    RedrawTimelines()
     return
 
 def ValidTime(start, end): #Checks whether the section timestamps are valid. Returns False if invalid, True if valid.
@@ -124,6 +140,7 @@ def DeleteSection(index):
         SwapSections(i, i+1)
     sectionList[-1]["button"].destroy()
     sectionList.pop(index)
+    RedrawTimelines()
     return
 
 def StampToSec(hours, minutes, seconds):
@@ -136,6 +153,76 @@ def SecToString(seconds):
     minutes = seconds // 60
     seconds = seconds % 60
     return f"{hours:02}:{minutes:02}:{seconds:02}"
+
+def YTTDuration():
+    totalTime = 0
+    for section in sectionList:
+        totalTime += section["end"] - section["start"] + 1 #times are inclusive so I'm adding 1
+    return totalTime
+
+def SectionStarts():
+    totalTime = 0
+    starts = []
+    for section in sectionList:
+        starts.append(totalTime)
+        totalTime += section["end"] - section["start"] + 1 #times are inclusive so I'm adding 1
+    starts.append(totalTime)
+    return starts
+
+def RedrawTimelines():
+    timelines.delete("all")
+
+    timelines.create_line(timelineMinx, jsonLine, timelineMaxx, jsonLine, fill="white")
+    timelines.create_line(timelineMinx, yttLine, timelineMaxx, yttLine, fill="white")
+    timelines.create_line(timelineMinx, jsonLine + timelineMark + 5, timelineMinx, jsonLine - timelineMark - 5, fill="white")
+    timelines.create_line(timelineMaxx, jsonLine + timelineMark + 5, timelineMaxx, jsonLine - timelineMark - 5, fill="white")
+    timelines.create_line(timelineMinx, yttLine + timelineMark + 5, timelineMinx, yttLine - timelineMark - 5, fill="white")
+    timelines.create_line(timelineMaxx, yttLine + timelineMark + 5, timelineMaxx, yttLine - timelineMark - 5, fill="white")
+
+    duration = YTTDuration()
+    starts = SectionStarts()
+    timelineLength = timelineMaxx - timelineMinx
+
+    timelines.create_text(
+        630, jsonLine - 55,
+        text="Current Chatlog",
+        fill="white",
+        font=("Roboto", 13),
+        anchor="center"
+    )
+    timelines.create_text(
+        630, yttLine - 55,
+        text="Output File",
+        fill="white",
+        font=("Roboto", 13),
+        anchor="center"
+    )
+
+    i = 0
+    for section in sectionList:
+        if section["json"] == currentJson:
+            jsonLength = jsonData[currentJson]["endTime"]
+            jsonxS = (section["start"]/jsonLength * timelineLength) + timelineMinx + 1
+            jsonxE = (section["end"]/jsonLength * timelineLength) + timelineMinx - 1
+            timelines.create_line(jsonxS, jsonLine + timelineMark, jsonxS, jsonLine - timelineMark, fill=section["color"])
+            timelines.create_line(jsonxE, jsonLine + timelineMark, jsonxE, jsonLine - timelineMark, fill=section["color"])
+            timelines.create_line(jsonxS, jsonLine - timelineMark, jsonxE, jsonLine - timelineMark, fill=section["color"])
+
+        yttxS = ((starts[i]/duration) * timelineLength) + timelineMinx + 1
+        yttxE = (((starts[i+1])/duration) * timelineLength) + timelineMinx - 1
+        timelines.create_line(yttxS, yttLine + timelineMark, yttxS, yttLine - timelineMark, fill=section["color"])
+        timelines.create_line(yttxE, yttLine + timelineMark, yttxE, yttLine - timelineMark, fill=section["color"])
+        timelines.create_line(yttxS, yttLine - timelineMark, yttxE, yttLine - timelineMark, fill=section["color"])
+        i += 1
+    return
+
+def GenerateColor():
+    global lastColor
+    color = random.choice(colors)
+    while color == lastColor:
+        color = random.choice(colors)
+    lastColor = color
+    return color
 
 #--------------------------------------------------------------------------
 #Defining general App sections. leftSide, sectionEditor
@@ -176,7 +263,6 @@ sectionEditor.grid_rowconfigure(1, weight=1)
 sectionEditorTitle = customtkinter.CTkLabel(master = sectionEditor, text="Section Editor")
 sectionEditorTitle.grid(row=0, column=0, padx=1, pady=(1, 10), sticky="ew")
 sectionEditorTitle.configure(font = ("Roboto", 15))
-
 
 #--------------------------------------------------------------------------
 #sectionAdder. Where the user adds a new JSON section to the sectionEditor.
@@ -229,14 +315,24 @@ secEnd.configure(width=30, justify="center")
 createSectionButton = customtkinter.CTkButton(master=sectionAdder, text="Create Section", command=CreateSection)
 createSectionButton.grid(row=3, column=0, padx=5, pady=(10,15), sticky="n")
 
+#--------------------------------------------------------------------------
+#Timelines. Where the currently selected JSON's timeline is displayed, and where the total YTT section view is displayed.
+timelines = tkinter.Canvas(
+    app,
+    width=400,
+    height=300,
+    bg="#202020", #Matching canvas with customtkinter color
+    highlightthickness=0
+)
 
+timelines.grid(row=4, column=0, columnspan=3, sticky="nsew")
+timelineMinx = 50
+timelineMaxx = 1200
+timelineMark = 8 #The delta y values of each mark on the timeline
+jsonLine = 90 #The y values of each timelined
+yttLine = 240
 
-
-
-
-
-
-
+RedrawTimelines()
 
 #--------------------------------------------------------------------------
 app.mainloop()  # Called at the end.
