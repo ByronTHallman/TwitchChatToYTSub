@@ -2,6 +2,11 @@ import customtkinter
 import tkinter
 import json
 import random
+import threading
+#Kai Change 10/31/26: New imports needed for merging.
+import yttconverter
+import chat_downloader
+from chat_downloader import ChatDownloader
 from tkinter import filedialog, messagebox
 from pathlib import Path
 
@@ -13,7 +18,7 @@ customtkinter.set_default_color_theme("dark-blue")
 app = customtkinter.CTk()  # creates the window
 app.geometry("1000x800")
 app.resizable(False, False) #The timelines sorta break if the window is resizable.
-app.title("idk bro")
+app.title("idek either :/")
 
 jsonData = [] #List of dictionaries. "path", "name", "endTime"
 currentJson = -1 #The index of the current JSON in jsonData
@@ -49,7 +54,7 @@ app.bind("<KeyPress>", KeyPress)
 #--------------------------------------------------------------------------
 #Functions
 #Opens JSON file picker, imports, and adds data to jsonData
-def ImportJson():
+def ImportJSON():
     filePath = filedialog.askopenfilename(
         title="Import JSON file",
         filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
@@ -76,6 +81,66 @@ def ImportJson():
     )
     newCard.grid(row=len(jsonData), column=0, padx=5, pady=2, sticky="ew")
 
+#Kai Change 10/31/26: Added VOD URL importing and parsing through ChatDownloader library.
+#WARNING: This does NOT work, as the library seems to be out of date with Twitch's API.
+#Looking into an alternative with TwitchDownloaderCLI.exe
+def ImportURL():
+
+    #Prompt user for URL
+    dialog = customtkinter.CTkInputDialog(
+            text="Paste the Twitch VOD URL below:",
+            title="Import Twtich VOD form URL"
+    )
+    vod_url = dialog.get_input()
+
+    #Exit if canceled/left blank
+    if not vod_url:
+        return
+
+    #Inner function for downloading via ChatDownloader library.
+    def download():
+        #Attempt to download directly via user's URL, trying to format to match previous style.
+        try:
+            vod_chat = ChatDownloader().get_chat(vod_url)
+            vod_title = vod_chat.info.get('title', 'Unnamed Twitch VOD')
+            formatted_comments = []
+            for message in vod_chat:
+                formatted_comment = {
+                    'commenter': {
+                            'display_name': message.get('author', {}).get('name', '')
+                    },
+                    'message': {
+                            'body': message.get('message', '')
+                    },
+                    'content_offset_seconds': message.get('time_in_seconds', 0.0)
+                }
+                formatted_comments.append(formatted_comment)
+            lastSecond = formatted_comments[-1]["content_offset_seconds"] if formatted_comments else 0.0
+
+        #Exceptions and warnings for invalid URLs:
+        except Exception as error:
+            app.after(0, lambda: messagebox.showerror("Import failed", f"Could not fetch chat from URL:\n{error}"))
+            return
+        if not formatted_comments:
+            app.after(0, lambda: messagebox.showwarning("Empty Chat", "Warning: No messages found for this VOD."))
+
+        #If successful import, attach block to jsonData.
+        def update_ui():
+            jsonData.append({"path": vod_url, "name": vod_title, "endTime": lastSecond, "comments": formatted_comments})
+            if len(jsonData) == 1:
+                SelectJson(0)
+            newCard = customtkinter.CTkButton(
+                master=jsonVisualizer,
+                text=str(len(jsonData)-1) + " - " + jsonData[-1]["name"] + "\nDuration: " + str(jsonData[-1]["endTime"]),
+                command=lambda index=len(jsonData) - 1: SelectJson(index)
+            )
+            newCard.grid(row=len(jsonData), column=0, padx=5, pady=2, sticky="ew")
+
+        app.after(0, update_ui)
+
+    #Program would completely freeze unless threading was brought in.
+    threading.Thread(target=download, daemon=True).start()
+
 def SelectJson(index):
     global currentJson
     currentJson = index
@@ -97,9 +162,14 @@ def CreateSection():
 
     start = StampToSec(hourS,minS,secS)
     end = StampToSec(hourE,minE,secE)
+    maxEnd = jsonData[currentJson]["endTime"]
 
     if not ValidTime(start, end):
         return
+
+    if(end > maxEnd):
+        messagebox.showwarning("Section Warning", "Specified time longer than JSON. Falling back to maximum length.")
+        end = maxEnd
 
     color = GenerateColor()
     sectionButton = customtkinter.CTkButton(
@@ -115,7 +185,11 @@ def CreateSection():
     return
 
 def ValidTime(start, end): #Checks whether the section timestamps are valid. Returns False if invalid, True if valid.
-    if start >= end or start < 0 or end < 0 or end > jsonData[currentJson]["endTime"]:
+    if start > end or start < 0 or end < 0:
+        messagebox.showwarning("Invalid Section", "Please make sure your start is not before your end.")
+        return False
+    elif start == end:
+        messagebox.showwarning("Invalid Section", "This section is zero seconds long!")
         return False
     else:
         return True
@@ -184,14 +258,16 @@ def RedrawTimelines():
     timelineLength = timelineMaxx - timelineMinx
 
     timelines.create_text(
-        630, jsonLine - 55,
+        #Kai Change 10/30/26: Changed 630 to 500 for X-coordinate.
+        500, jsonLine - 55,
         text="Current Chatlog",
         fill="white",
         font=("Roboto", 13),
         anchor="center"
     )
     timelines.create_text(
-        630, yttLine - 55,
+        #Kai Change 10/30/26: Changed 630 to 500 for X-coordinate.
+        500, yttLine - 55,
         text="Output File",
         fill="white",
         font=("Roboto", 13),
@@ -224,6 +300,34 @@ def GenerateColor():
     lastColor = color
     return color
 
+#Kai Change 10/29/26: The primary merging implementation, sends data to Berrin's converter and executes it. 
+def ExportYTT():
+    if len(sectionList) == 0:
+        messagebox.showwarning("Export Error", "No sections have been added to the timeline.")
+        return
+        
+    # Assemble the data for the backend in the exact order of sectionList
+    ordered_sections = []
+    for section in sectionList:
+        json_index = section["json"]
+        file_path = jsonData[json_index]["path"]
+        
+        ordered_sections.append({
+            "path": file_path,
+            "start": section["start"],
+            "end": section["end"]
+        })
+        
+    # Temporary; output hardcoded to just being named this for now.
+    output_path = "output.ytt"
+        
+    # Hand the ordered list directly to Berrin's module
+    try:
+        yttconverter.generate_ytt(ordered_sections, output_path)
+        messagebox.showinfo("Success", "YTT file generated successfully!")
+    except Exception as error:
+        messagebox.showerror("Export Failed", f"An error occurred during conversion:\n{error}")
+
 #--------------------------------------------------------------------------
 #Defining general App sections. leftSide, sectionEditor
 app.grid_rowconfigure(0, weight=1)
@@ -231,21 +335,25 @@ app.grid_columnconfigure(1, weight=1)
 leftSide = customtkinter.CTkFrame(master=app)
 leftSide.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
 
-sectionEditor = customtkinter.CTkScrollableFrame(master=app)
-sectionEditor.grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
-
 sectionAdder = customtkinter.CTkFrame(master=app)
 sectionAdder.grid(row=0, column=1, padx=10, pady=10, sticky="new")
+
+rightSide = customtkinter.CTkFrame(master=app)
+rightSide.grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
 
 #--------------------------------------------------------------------------
 #leftSide. Importing and JSON visualizer.
 leftSide = customtkinter.CTkFrame(master=app)
 leftSide.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
 leftSide.grid_columnconfigure(0, weight=1)
-leftSide.grid_rowconfigure(1, weight=1)
+leftSide.grid_rowconfigure(2, weight=1)
 
-importButton = customtkinter.CTkButton(master=leftSide, text="Import Chatlog", command=ImportJson)
-importButton.grid(row=0, column=0, padx=5, pady=5, sticky="new")
+#importJSON. Prompts user to import JSON files.
+importJSON = customtkinter.CTkButton(master=leftSide, text="Import by File", command=ImportJSON)
+importJSON.grid(row=0, column=0, padx=5, pady=5, sticky="new")
+
+importURL = customtkinter.CTkButton(master=leftSide, text="Import by URL", command=ImportURL, fg_color="#7a2b2b", hover_color="#5c1e1e")
+importURL.grid(row=1, column=0, padx=5, pady=5, sticky="new")
 
 jsonVisualizer = customtkinter.CTkScrollableFrame(master=leftSide)
 jsonVisualizer.grid_columnconfigure(0, weight=1)
@@ -253,10 +361,25 @@ jsonVisualizer.grid_rowconfigure(1, weight=1)
 jsonVisualizerTitle = customtkinter.CTkLabel(master = jsonVisualizer, text="Imported Chatlogs")
 jsonVisualizerTitle.grid(row=0, column=0, padx=1, pady=(1, 10), sticky="ew")
 jsonVisualizerTitle.configure(font = ("Roboto", 15))
-jsonVisualizer.grid(row=1, column=0, padx=5, pady=5, sticky="nsew")
+jsonVisualizer.grid(row=2, column=0, padx=5, pady=5, sticky="nsew")
 
 #--------------------------------------------------------------------------
+#Kai Change 10/29/26: Created right side master to mirror left side of UI, seemed to look nice.
+#rightSide. Export and section editor.
+rightSide = customtkinter.CTkFrame(master=app)
+rightSide.grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
+rightSide.grid_columnconfigure(0, weight=1)
+rightSide.grid_rowconfigure(1, weight=1)
+
+#Kai Change 10/29/26: Needed to add this for obvious reasons.
+#exportButton. Sends the ordered list of JSONs to the YTT subtitles converter.
+exportButton = customtkinter.CTkButton(master=rightSide, text="Export to YTT", command=ExportYTT, fg_color="#2b7a3d", hover_color="#1e5c2d")
+exportButton.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+
 #sectionEditor. Where the user reorganizes the order of JSON sections.
+sectionEditor = customtkinter.CTkScrollableFrame(master=rightSide)
+sectionEditor.grid(row=1, column=0, padx=10, pady=10, sticky="nsew")
+
 sectionEditor.grid_columnconfigure(0, weight=1)
 sectionEditor.grid_rowconfigure(1, weight=1)
 
@@ -327,7 +450,8 @@ timelines = tkinter.Canvas(
 
 timelines.grid(row=4, column=0, columnspan=3, sticky="nsew")
 timelineMinx = 50
-timelineMaxx = 1200
+#Kai Change 10/30/26: Old Y Coord as timelineMaxx = 1200 went off screen.
+timelineMaxx = 950
 timelineMark = 8 #The delta y values of each mark on the timeline
 jsonLine = 90 #The y values of each timelined
 yttLine = 240
