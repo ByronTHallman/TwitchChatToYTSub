@@ -68,7 +68,7 @@ def generate_ytt(ordered_sections, output_path):
 					users.append(display_name)
 					userIndex = users.index(display_name)
 
-					if i['message']['user_color'] is not ("null" or None):
+					if i['message']['user_color'] not in [None, "null"]:
 						color = i['message']['user_color']
 					else:
 						color = "#"+secrets.token_hex(3)

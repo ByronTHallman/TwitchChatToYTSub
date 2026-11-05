@@ -6,6 +6,8 @@ import tkinter
 import json
 import random
 import threading
+#Kai Change 11/5/26: Importing time and date to get downloaded vod dates from first message.
+from datetime import datetime
 #Kai Change 10/31/26: New imports needed for merging.
 import yttconverter
 import chat_downloader
@@ -74,9 +76,28 @@ def ImportJSON():
         messagebox.showerror("Import failed", f"Could not load this JSON file:\n{error}")
         return
 
-    lastSecond = imported_data["comments"][-1]["content_offset_seconds"]
-    fileName = Path(filePath).stem
-    jsonData.append({"path":filePath, "name":fileName, "endTime":lastSecond})
+    # Get information about the stream.
+    json_file_data = imported_data.get("FileInfo") if imported_data else None
+    json_video_data = imported_data.get("video") if imported_data else None
+    json_streamer_data = imported_data.get("streamer") if imported_data else None
+    json_comments = imported_data.get("comments", []) if imported_data else None
+    json_chapter_data = json_video_data.get('chapters', []) if json_video_data else None
+    json_date_data = str(json_file_data.get("CreatedAt")) if json_file_data else "Unknown Date"
+    json_date_part = json_date_data.split("T")[0] if json_date_data else 000000
+    year, month, day = json_date_part.split("-")
+
+    # Create label.
+    json_streamer = json_streamer_data.get("name") if json_streamer_data else "Unknown Streamer"
+    json_game = json_chapter_data[0].get("gameDisplayName") if json_chapter_data and len(json_chapter_data) > 0 else "Unknown Game"
+    json_date = f"{month}/{day}/{year[-2:]}"
+    lastSecond = json_comments[-1].get("content_offset_seconds", 0) if json_comments else 0
+    json_label = f"{json_streamer}, {json_date}\nGame: {json_game}"
+
+    # If some data is missing, fallback to filename.
+    if(not (json_streamer or json_game or json_date)):
+        json_label = Path(filePath).stem
+
+    jsonData.append({"path":filePath, "name":json_label, "endTime":lastSecond})
     if len(jsonData) == 1:
         SelectJson(0)
     newCard = customtkinter.CTkButton(
@@ -102,63 +123,77 @@ def ImportURL():
     if not vod_url:
         return
 
-    #Inner function for downloading via ChatDownloader library.
+    # Inner function for downloading via ChatDownloader library.
     def download():
-        #Attempt to download directly via user's URL, trying to format to match previous style.
+        # Attempt to download directly via user's URL, trying to format to match previous style.
         try:
+            # Download chat. 
+            # Need to query metadata for more streamer name, game name.
             vod_chat = ChatDownloader().get_chat(vod_url)
+            vod_query = [{'operationName': 'VideoMetadata', 'variables': {'channelLogin': '', 'videoID': vod_chat.id}}]
+            vod_data = vod_chat.site._download_gql(vod_query)[0]['data']['video']
 
-            # Need title for Imported Chatlogs UI
-            vod_title = getattr(vod_chat, 'title', 'Unnamed Twitch VOD')
+            # Label for "Imported Chatlogs" UI.
+            # Stream titles usually too long, 
+            # so using streamer name, game name, date.
+            vod_streamer = vod_data.get('owner', {}).get('displayName')
+            vod_game = vod_data.get('game', {}).get('displayName') if vod_data.get('game') else "Unknown Game"
+            vod_utc = next(iter(vod_chat))['timestamp']
+            vod_date = datetime.fromtimestamp(vod_utc / 1000000).strftime(f"%m/%d/%y")
+            vod_label = f"{vod_streamer}, {vod_date}\nGame: {vod_game}"
 
-            # Extract VOD ID from URL to name the local JSON file cleanly
+            # Filename handling for downloaded temp files, based on vod ID number.
             vod_id = vod_url.strip().split("videos/")[-1].split("?")[0]
-            output_filename = str(Path(tempDir) / f"temp_chat_{vod_id}.json")
-            tempDownloads.append(output_filename)
+            vod_tempfile = str(Path(tempDir) / f"temp_chat_{vod_id}.json")
+            tempDownloads.append(vod_tempfile)
 
+            # Parse comments into expected format for converter.
             formatted_comments = []
-            for message in vod_chat:
+            for vod_message in vod_chat:
                 formatted_comment = {
                     'commenter': {
-                            'display_name': message.get('author', {}).get('display_name', '')
+                            'display_name': vod_message.get('author', {}).get('display_name', '')
                     },
                     'message': {
-                            'body': message.get('message', ''),
-                            'user_color': message.get('author', {}).get('colour')
+                            'body': vod_message.get('message', ''),
+                            'user_color': vod_message.get('author', {}).get('colour')
                     },
-                    'content_offset_seconds': message.get('time_in_seconds', 0.0)
+                    'content_offset_seconds': vod_message.get('time_in_seconds', 0.0)
                 }
-                #print("User Color for this message is", message.get('author', {}).get('colour'))
-                #print("\n")
                 formatted_comments.append(formatted_comment)
             lastSecond = formatted_comments[-1]["content_offset_seconds"] if formatted_comments else 0.0
 
-            with open(output_filename, "w", encoding="utf-8") as f:
+            # Dump formatted comments into downloaded temp file.
+            with open(vod_tempfile, "w", encoding="utf-8") as f:
                 json.dump({"comments": formatted_comments}, f, ensure_ascii=False, indent=4)
 
         #Exceptions and warnings for invalid URLs:
         except Exception as error:
+            #I'll be honest, I'm not sure why formatting it this way is necessary,
+            #aside from the fact that threading causes the exception to break without this variable.
             err_msg = str(error)
             app.after(0, lambda url=err_msg: messagebox.showerror("Import failed", f"Could not fetch chat from URL:\n{url}"))
             return
         if not formatted_comments:
             app.after(0, lambda: messagebox.showwarning("Empty Chat", "Warning: No messages found for this VOD."))
 
-        #If successful import, attach block to jsonData.
+        #If successful download, attach vod's relevant info to new jsonData block.
         def update_ui():
-            jsonData.append({"path": output_filename, "name": vod_title, "endTime": lastSecond, "comments": formatted_comments})
+            jsonData.append({"path": vod_tempfile, "name": vod_label, "endTime": lastSecond, "comments": formatted_comments})
             if len(jsonData) == 1:
                 SelectJson(0)
             newCard = customtkinter.CTkButton(
                 master=jsonVisualizer,
                 text=str(len(jsonData)-1) + " - " + jsonData[-1]["name"] + "\nDuration: " + str(jsonData[-1]["endTime"]),
-                command=lambda index=len(jsonData) - 1: SelectJson(index)
+                command=lambda index=len(jsonData) - 1: SelectJson(index),
+                fg_color="#7a2b2b", hover_color="#5c1e1e"
             )
             newCard.grid(row=len(jsonData), column=0, padx=5, pady=2, sticky="ew")
 
+        # Needed due to threading.
         app.after(0, update_ui)
 
-    #Program would completely freeze unless threading was brought in.
+    #Program froze on download unless threading was brought in.
     threading.Thread(target=download, daemon=True).start()
 
 def SelectJson(index):
@@ -184,12 +219,10 @@ def CreateSection():
     end = StampToSec(hourE,minE,secE)
     maxEnd = jsonData[currentJson]["endTime"]
 
-    if not ValidTime(start, end):
+    #Update endpoint depending on validity of inputs.
+    end = ValidateEnd(start, end, maxEnd)
+    if(end == 0):
         return
-
-    if(end > maxEnd):
-        messagebox.showwarning("Section Warning", "Specified time longer than JSON. Falling back to maximum length.")
-        end = maxEnd
 
     color = GenerateColor()
     sectionButton = customtkinter.CTkButton(
@@ -204,15 +237,24 @@ def CreateSection():
     RedrawTimelines()
     return
 
-def ValidTime(start, end): #Checks whether the section timestamps are valid. Returns False if invalid, True if valid.
+def ValidateEnd(start, end, maxEnd): #Checks whether the section timestamps are valid. Returns False if invalid, True if valid.
+    if(maxEnd) <= 0 or (start >= maxEnd):
+        messagebox.showwarning("Invalid Section", "Specified time can only create section of zero seconds, please try again.")
+        return 0
+    if(end > maxEnd):
+        messagebox.showwarning("Section Warning", "Specified time longer than chatlog.\n\nSetting end to maximum length.")
+        return maxEnd
     if start > end or start < 0 or end < 0:
-        messagebox.showwarning("Invalid Section", "Please make sure your start is not before your end.")
-        return False
+        messagebox.showwarning("Section Warning", "Please make sure your start is not before your end.\n\nSetting end to maximum length.")
+        return maxEnd
     elif start == end:
-        messagebox.showwarning("Invalid Section", "This section is zero seconds long!")
-        return False
-    else:
-        return True
+        messagebox.showwarning("Section Warning", "Section is zero seconds long!\n\nSetting end to maximum length.")
+        return maxEnd
+
+    # Leave end unchanged if valid.
+    return end
+
+
 
 def SelectSection(index):
     global currentSection
