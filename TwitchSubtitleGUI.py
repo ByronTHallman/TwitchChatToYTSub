@@ -1,3 +1,6 @@
+import atexit
+import tempfile
+import os #for handling download management
 import customtkinter
 import tkinter
 import json
@@ -29,6 +32,8 @@ colors = [ #Some hand-picked OKLCH colors
     "#007078", "#0164a3", "#5c52a3", "#824387"
 ]
 lastColor = "#000000" #The last used color so we don't use it again
+tempDownloads = [] #Any file downloaded by URL will be added to this list to be removed on shutdown
+tempDir = tempfile.gettempdir()
 
 #--------------------------------------------------------------------------
 #Keyboard Input
@@ -89,7 +94,7 @@ def ImportURL():
     #Prompt user for URL
     dialog = customtkinter.CTkInputDialog(
             text="Paste the Twitch VOD URL below:",
-            title="Import Twtich VOD form URL"
+            title="Import Twitch VOD form URL"
     )
     vod_url = dialog.get_input()
 
@@ -102,31 +107,46 @@ def ImportURL():
         #Attempt to download directly via user's URL, trying to format to match previous style.
         try:
             vod_chat = ChatDownloader().get_chat(vod_url)
-            vod_title = vod_chat.info.get('title', 'Unnamed Twitch VOD')
+
+            # Need title for Imported Chatlogs UI
+            vod_title = getattr(vod_chat, 'title', 'Unnamed Twitch VOD')
+
+            # Extract VOD ID from URL to name the local JSON file cleanly
+            vod_id = vod_url.strip().split("videos/")[-1].split("?")[0]
+            output_filename = str(Path(tempDir) / f"temp_chat_{vod_id}.json")
+            tempDownloads.append(output_filename)
+
             formatted_comments = []
             for message in vod_chat:
                 formatted_comment = {
                     'commenter': {
-                            'display_name': message.get('author', {}).get('name', '')
+                            'display_name': message.get('author', {}).get('display_name', '')
                     },
                     'message': {
-                            'body': message.get('message', '')
+                            'body': message.get('message', ''),
+                            'user_color': message.get('author', {}).get('colour')
                     },
                     'content_offset_seconds': message.get('time_in_seconds', 0.0)
                 }
+                #print("User Color for this message is", message.get('author', {}).get('colour'))
+                #print("\n")
                 formatted_comments.append(formatted_comment)
             lastSecond = formatted_comments[-1]["content_offset_seconds"] if formatted_comments else 0.0
 
+            with open(output_filename, "w", encoding="utf-8") as f:
+                json.dump({"comments": formatted_comments}, f, ensure_ascii=False, indent=4)
+
         #Exceptions and warnings for invalid URLs:
         except Exception as error:
-            app.after(0, lambda: messagebox.showerror("Import failed", f"Could not fetch chat from URL:\n{error}"))
+            err_msg = str(error)
+            app.after(0, lambda url=err_msg: messagebox.showerror("Import failed", f"Could not fetch chat from URL:\n{url}"))
             return
         if not formatted_comments:
             app.after(0, lambda: messagebox.showwarning("Empty Chat", "Warning: No messages found for this VOD."))
 
         #If successful import, attach block to jsonData.
         def update_ui():
-            jsonData.append({"path": vod_url, "name": vod_title, "endTime": lastSecond, "comments": formatted_comments})
+            jsonData.append({"path": output_filename, "name": vod_title, "endTime": lastSecond, "comments": formatted_comments})
             if len(jsonData) == 1:
                 SelectJson(0)
             newCard = customtkinter.CTkButton(
@@ -305,6 +325,17 @@ def ExportYTT():
     if len(sectionList) == 0:
         messagebox.showwarning("Export Error", "No sections have been added to the timeline.")
         return
+
+    # Ask the user for where to save the output and as what?
+    output_path = filedialog.asksaveasfilename(
+        title="Save YTT File As",
+        defaultextension=".ytt",
+        filetypes=[("YouTube TimedText files", "*.ytt"), ("All files", "*.*")],
+        initialfile="chat-to-subtitles.ytt"
+    )
+
+    if not output_path:
+        return
         
     # Assemble the data for the backend in the exact order of sectionList
     ordered_sections = []
@@ -317,14 +348,11 @@ def ExportYTT():
             "start": section["start"],
             "end": section["end"]
         })
-        
-    # Temporary; output hardcoded to just being named this for now.
-    output_path = "output.ytt"
-        
+
     # Hand the ordered list directly to Berrin's module
     try:
         yttconverter.generate_ytt(ordered_sections, output_path)
-        messagebox.showinfo("Success", "YTT file generated successfully!")
+        messagebox.showinfo("Success", f"YTT file generated successfully!\nSaved to: {output_path}")
     except Exception as error:
         messagebox.showerror("Export Failed", f"An error occurred during conversion:\n{error}")
 
@@ -455,6 +483,17 @@ timelineMaxx = 950
 timelineMark = 8 #The delta y values of each mark on the timeline
 jsonLine = 90 #The y values of each timelined
 yttLine = 240
+
+def cleanup():
+    for file_path in tempDownloads:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                print(f"Cleaned up temp file: {file_path}")
+            except Exception as e:
+                print(f"Could not remove {file_path}: {e}")
+
+atexit.register(cleanup)
 
 RedrawTimelines()
 

@@ -7,7 +7,7 @@ import html
 
 #Kai Change 10/28/26: Refactored into a function, as dictionaries can be passed in by other scripts calling it.
 #Todo: Pass in other variables like delta, duration, size, etc. Delta may be deprecated entirely for another feature
-def generate_ytt(ordered_sections, output_path="output.ytt"):
+def generate_ytt(ordered_sections, output_path):
 
 	# Time delay in second for chat, to sync with video. For me, 7s looks like it's in sync with what the video display
 	delta = 7
@@ -68,7 +68,7 @@ def generate_ytt(ordered_sections, output_path="output.ytt"):
 					users.append(display_name)
 					userIndex = users.index(display_name)
 
-					if i['message']['user_color'] is not None:
+					if i['message']['user_color'] is not ("null" or None):
 						color = i['message']['user_color']
 					else:
 						color = "#"+secrets.token_hex(3)
@@ -126,7 +126,7 @@ def generate_ytt(ordered_sections, output_path="output.ytt"):
 	"""
 
 
-	with open("output.ytt", 'w', encoding='UTF-8') as outputFile:
+	with open(output_path, 'w', encoding='UTF-8') as outputFile:
 		outputFile.write(header + middle + output + footer)
 
 	print(header+middle+output+footer)
