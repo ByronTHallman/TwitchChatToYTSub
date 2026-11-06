@@ -2,7 +2,7 @@ TODO:
 
 (Zion)
 Centerscreen visualizer: scrolling text box that represents contents of currently clicked json file or section 
-save/load system that takes everything currently in the environment and saves it to like an xml file to be loaded in later, with error catching for things like files that have since been deleted (zion)
+save/load system that takes everything currently in the environment and saves it to like an xml file to be loaded in later, with error catching for things like files that have since been deleted
 
 (Byron)
 undo/redo system, 
