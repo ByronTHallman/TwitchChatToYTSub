@@ -7,7 +7,7 @@ import json
 import random
 import threading
 #Kai Change 11/5/26: Importing time and date to get downloaded vod dates from first message.
-from datetime import datetime
+from datetime import datetime, timedelta
 #Kai Change 10/31/26: New imports needed for merging.
 import yttconverter
 import chat_downloader
@@ -23,7 +23,7 @@ customtkinter.set_default_color_theme("dark-blue")
 app = customtkinter.CTk()  # creates the window
 app.geometry("1000x800")
 app.resizable(False, False) #The timelines sorta break if the window is resizable.
-app.title("idek either :/")
+app.title("where even am i")
 
 jsonData = [] #List of dictionaries. "path", "name", "endTime"
 currentJson = -1 #The index of the current JSON in jsonData
@@ -62,66 +62,89 @@ app.bind("<KeyPress>", KeyPress)
 #Functions
 #Opens JSON file picker, imports, and adds data to jsonData
 def ImportJSON():
+
+    # Create a placeholder "Importing..." card
+    # Doing this before the filedialog process because
+    # the filedialog process seems to take the longest.
+    jsonCard = customtkinter.CTkButton(
+        master=jsonVisualizer,
+        text="Importing...",
+        state="disabled",   # Prevent clicking while loading
+        fg_color="#374c64"  # Greyer color for loading state
+    )
+    jsonCard.grid(row=len(jsonData)+1, column=0, padx=5, pady=2, sticky="ew")
+
+    # Prompt user for JSON.
     filePath = filedialog.askopenfilename(
         title="Import JSON file",
         filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
     )
     if not filePath:
+        app.after(0, jsonCard.destroy)
         return
 
+    # Attempt importing.
     try:
         with open(filePath, "r", encoding="utf-8") as json_file:
             imported_data = json.load(json_file)
     except (OSError, json.JSONDecodeError) as error:
         messagebox.showerror("Import failed", f"Could not load this JSON file:\n{error}")
+        app.after(0, jsonCard.destroy)
         return
 
-    # Get information about the stream.
-    json_file_data = imported_data.get("FileInfo") if imported_data else None
-    json_video_data = imported_data.get("video") if imported_data else None
-    json_streamer_data = imported_data.get("streamer") if imported_data else None
-    json_comments = imported_data.get("comments", []) if imported_data else None
-    json_chapter_data = json_video_data.get('chapters', []) if json_video_data else None
-    json_date_data = str(json_file_data.get("CreatedAt")) if json_file_data else "Unknown Date"
-    json_date_part = json_date_data.split("T")[0] if json_date_data else 000000
-    year, month, day = json_date_part.split("-")
+    # Get stream metadata to create label.
+    json_metadata = ImportMetadataJSON(imported_data)
 
-    # Create label.
-    json_streamer = json_streamer_data.get("name") if json_streamer_data else "Unknown Streamer"
-    json_game = json_chapter_data[0].get("gameDisplayName") if json_chapter_data and len(json_chapter_data) > 0 else "Unknown Game"
-    json_date = f"{month}/{day}/{year[-2:]}"
-    lastSecond = json_comments[-1].get("content_offset_seconds", 0) if json_comments else 0
-    json_label = f"{json_streamer}, {json_date}\nGame: {json_game}"
+    # Label information.
+    json_label = f"{json_metadata['streamer']}, {json_metadata['date']}\nGame: {json_metadata['game']}"
+    lastSecond = (json_metadata['comments'][-1].get("content_offset_seconds", 0) or json_metadata['comments'][-1].get("time_in_seconds")) if json_metadata['comments'] else 0
 
     # If some data is missing, fallback to filename.
-    if(not (json_streamer or json_game or json_date)):
+    if(not (json_metadata['streamer'] or json_metadata['game'] or json_metadata['date'])):
         json_label = Path(filePath).stem
 
+    # Attach this JSON to the chain of chatlog information.
     jsonData.append({"path":filePath, "name":json_label, "endTime":lastSecond})
     if len(jsonData) == 1:
         SelectJson(0)
-    newCard = customtkinter.CTkButton(
-        master=jsonVisualizer,
-        text=str(len(jsonData)-1) + " - " + jsonData[-1]["name"] + "\nDuration: " + str(jsonData[-1]["endTime"]),
+
+    # Update the "importing" label to reflect the JSON's information.
+    jsonCard.configure(
+        text=str(len(jsonData)-1) 
+        + " - " + jsonData[-1]["name"] 
+        + "\nDuration: "
+        + "(" 
+        + str(timedelta(seconds=lastSecond)) + ")",
+        state="normal",
+        fg_color="#1f538d", hover_color="#14375e",
         command=lambda index=len(jsonData) - 1: SelectJson(index)
     )
-    newCard.grid(row=len(jsonData), column=0, padx=5, pady=2, sticky="ew")
 
-#Kai Change 10/31/26: Added VOD URL importing and parsing through ChatDownloader library.
-#WARNING: This does NOT work, as the library seems to be out of date with Twitch's API.
-#Looking into an alternative with TwitchDownloaderCLI.exe
+# This works now. Make sure to build with
+# this specific build of chat-downloader.
+# pip install git+https://github.com/Indigo128/chat-downloader.git@all_current_fixes
 def ImportURL():
 
-    #Prompt user for URL
+    # Prompt user for URL
     dialog = customtkinter.CTkInputDialog(
             text="Paste the Twitch VOD URL below:",
             title="Import Twitch VOD form URL"
     )
     vod_url = dialog.get_input()
 
-    #Exit if canceled/left blank
+    # Exit if canceled/left blank
     if not vod_url:
         return
+
+    # Create a placeholder "Downloading..." card
+    # Will be updated after successful download.
+    urlCard = customtkinter.CTkButton(
+        master=jsonVisualizer,
+        text="Downloading...",
+        state="disabled",   # Prevent clicking while loading
+        fg_color="#644040"  # Greyer color for loading state
+    )
+    urlCard.grid(row=len(jsonData)+1, column=0, padx=5, pady=2, sticky="ew")
 
     # Inner function for downloading via ChatDownloader library.
     def download():
@@ -130,20 +153,22 @@ def ImportURL():
             # Download chat. 
             # Need to query metadata for more streamer name, game name.
             vod_chat = ChatDownloader().get_chat(vod_url)
-            vod_query = [{'operationName': 'VideoMetadata', 'variables': {'channelLogin': '', 'videoID': vod_chat.id}}]
-            vod_data = vod_chat.site._download_gql(vod_query)[0]['data']['video']
 
-            # Label for "Imported Chatlogs" UI.
-            # Stream titles usually too long, 
-            # so using streamer name, game name, date.
-            vod_streamer = vod_data.get('owner', {}).get('displayName')
-            vod_game = vod_data.get('game', {}).get('displayName') if vod_data.get('game') else "Unknown Game"
-            vod_utc = next(iter(vod_chat))['timestamp']
-            vod_date = datetime.fromtimestamp(vod_utc / 1000000).strftime(f"%m/%d/%y")
-            vod_label = f"{vod_streamer}, {vod_date}\nGame: {vod_game}"
+            # Chat Downloader locks up if we let users input just links to Twitch profile pages.
+            # Don't let them do that.
+            if getattr(vod_chat, 'status', '') in ['live', 'upcoming']:
+                messagebox.showwarning("Invalid URL", "Please enter a VOD or Clip URL, not a channel link.")
+                app.after(0, urlCard.destroy)
+                return
 
-            # Filename handling for downloaded temp files, based on vod ID number.
-            vod_id = vod_url.strip().split("videos/")[-1].split("?")[0]
+            # Get metadata for label information.
+            vod_metadata = QueryMetadataVOD(vod_chat, vod_url)
+            vod_label = CreateLabel(vod_metadata, vod_chat)
+
+            # Write an appropriate ID value to the current VOD.
+            vod_id = WriteID(vod_url)
+
+            # Create tempfile for storing the downloaded JSON.
             vod_tempfile = str(Path(tempDir) / f"temp_chat_{vod_id}.json")
             tempDownloads.append(vod_tempfile)
 
@@ -167,28 +192,36 @@ def ImportURL():
             with open(vod_tempfile, "w", encoding="utf-8") as f:
                 json.dump({"comments": formatted_comments}, f, ensure_ascii=False, indent=4)
 
-        #Exceptions and warnings for invalid URLs:
+        # Exceptions and warnings for invalid URLs:
         except Exception as error:
-            #I'll be honest, I'm not sure why formatting it this way is necessary,
-            #aside from the fact that threading causes the exception to break without this variable.
+            # I'll be honest, I'm not sure why formatting it this way is necessary,
+            # aside from the fact that threading causes the exception to break without this variable.
             err_msg = str(error)
+            app.after(0, urlCard.destroy)
             app.after(0, lambda url=err_msg: messagebox.showerror("Import failed", f"Could not fetch chat from URL:\n{url}"))
             return
+
+        # Warn the user if the downloaded VOD has no comments. Unfortunate, but it does happen sometimes.
         if not formatted_comments:
             app.after(0, lambda: messagebox.showwarning("Empty Chat", "Warning: No messages found for this VOD."))
 
-        #If successful download, attach vod's relevant info to new jsonData block.
+        # If successful download, attach VOD info to the chain of chatlog information.
         def update_ui():
             jsonData.append({"path": vod_tempfile, "name": vod_label, "endTime": lastSecond, "comments": formatted_comments})
             if len(jsonData) == 1:
                 SelectJson(0)
-            newCard = customtkinter.CTkButton(
-                master=jsonVisualizer,
-                text=str(len(jsonData)-1) + " - " + jsonData[-1]["name"] + "\nDuration: " + str(jsonData[-1]["endTime"]),
-                command=lambda index=len(jsonData) - 1: SelectJson(index),
-                fg_color="#7a2b2b", hover_color="#5c1e1e"
+
+            # Update the "downloading" label to reflect the VOD's information
+            urlCard.configure(
+                text=str(len(jsonData)-1) 
+                + " - " + jsonData[-1]["name"] 
+                + "\nDuration: " 
+                + "(" 
+                + str(timedelta(seconds=lastSecond)) + ")",
+                state="normal",
+                fg_color="#7a2b2b", hover_color="#5c1e1e",
+                command=lambda index=len(jsonData) - 1: SelectJson(index)
             )
-            newCard.grid(row=len(jsonData), column=0, padx=5, pady=2, sticky="ew")
 
         # Needed due to threading.
         app.after(0, update_ui)
@@ -237,7 +270,9 @@ def CreateSection():
     RedrawTimelines()
     return
 
-def ValidateEnd(start, end, maxEnd): #Checks whether the section timestamps are valid. Returns False if invalid, True if valid.
+# Checks whether the section timestamps make sense, and updates the end accordingly.
+# Seems to be a less friction-inducing implementation.
+def ValidateEnd(start, end, maxEnd): 
     if(maxEnd) <= 0 or (start >= maxEnd):
         messagebox.showwarning("Invalid Section", "Specified time can only create section of zero seconds, please try again.")
         return 0
@@ -254,7 +289,96 @@ def ValidateEnd(start, end, maxEnd): #Checks whether the section timestamps are 
     # Leave end unchanged if valid.
     return end
 
+# For tempfile management, extracts VOD ID for use as a backend label.
+def WriteID(vod_url):
+    # Filename handling for downloaded temp files, based on vod ID number.
+    if "www.twitch.tv/" and "videos/" in vod_url:
+        return vod_url.strip().split("videos/")[-1].split("?")[0]
+    elif "www.twitch.tv/" and "/clip/" in vod_url:
+        return vod_url.strip().split("clip/")[-1].split("?")[0]
+    elif "clips.twitch.tv/" in vod_url:
+        return vod_url.strip().split("clips.twitch.tv/")[-1].split("?")[0]
+    else:
+        return str(random.randint(1, 1000000))
 
+# Pokes around the esoteric Chat-Downloader backend to try and get
+# things like game data and streamer name for the Chatlog labels.
+# Returns a dictionary to parse for the label.
+def QueryMetadataVOD(vod_chat, vod_url):
+
+    # Run query for metadata.
+    vod_query = [{'operationName': 'VideoMetadata', 'variables': {'channelLogin': '', 'videoID': vod_chat.id}}]
+    vod_data = vod_chat.site._download_gql(vod_query)[0]['data']['video']
+
+    # Create label for "Imported Chatlogs" UI.
+    streamer = vod_data.get('owner', {}).get('displayName') if vod_data else "Unknown"
+    game = vod_data.get('game', {}).get('displayName') if vod_data and vod_data.get('game') else "Unknown Game"
+    utc = next(iter(vod_chat))['timestamp'] if vod_chat else 0
+    date = datetime.fromtimestamp(utc / 1000000).strftime(f"%m/%d/%y")
+
+    # Clips struggle to provide information, so we'll force it to be this.
+    media_type = getattr(vod_chat, 'video_type', 'unknown')
+    if media_type == "clip":
+        streamer = 'Clip'
+        game = 'Clip'
+
+    # Return as metadata dictionary.
+    return {
+        "streamer": streamer,
+        "game": game,
+        "date": date
+    }
+
+# Parses the imported JSON file to find information
+# like streamer name, game name.
+# If those can't be found, handle it accordingly.
+def ImportMetadataJSON(imported_data, json_comments = []):
+
+    # Handling weird formatting in some JSON files.
+    if type(imported_data) == list:
+        # Some JSON downloaders seem to download as a list of comments only.
+        # Force format to being a dictionary. Turn JSON list into the 'comments' block.
+        json_comments = imported_data
+        imported_data = {'comments': imported_data}
+    else:
+        json_comments = imported_data.get('comments', []) if imported_data else None
+
+    # Extract higher level data.
+    json_video_data = imported_data.get('video') if imported_data else None
+    json_streamer_data = imported_data.get('streamer') if imported_data else None
+    json_chapter_data = json_video_data.get('chapters', []) if json_video_data else None
+
+    # Define date.
+    json_date_data = str(json_video_data.get('created_at')) if json_video_data else None
+    json_date_part = json_date_data.split("T")[0] if json_date_data else '00-00-00'
+    year, month, day = json_date_part.split("-")
+
+    # Create label.
+    json_streamer = json_streamer_data.get('name') if json_streamer_data else 'Unknown'
+    json_game = json_chapter_data[0].get('gameDisplayName') if json_chapter_data and len(json_chapter_data) > 0 else 'Unknown Game'
+    json_date = f"{month}/{day}/{year[-2:]}" if json_date_data != None else 'Unknown Date'
+
+    # Return as metadata dictionary, along with "comments" to be parsed for time.
+    return{
+        'streamer': json_streamer,
+        'game': json_game,
+        'date': json_date,
+        'comments': json_comments
+    }
+
+# Writes the string for the Chatlog list labels.
+def CreateLabel(metadata, vod_chat):
+    # TODO: Make the logical organization of this less ridiculously stupid.
+    if vod_chat:
+        media_type = getattr(vod_chat, 'video_type', 'unknown')
+        if media_type == "video":
+            return f"{metadata['streamer']}, {metadata['date']}\nGame: {metadata['game']}"
+        elif media_type == "clip":
+            return f"Clip: {metadata['date']}"
+        else:
+            return f"Invalid Chatlog"
+    else:
+        return f"{metadata['streamer']}, {metadata['date']}\nGame: {metadata['game']}"
 
 def SelectSection(index):
     global currentSection
