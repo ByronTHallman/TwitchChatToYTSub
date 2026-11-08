@@ -10,7 +10,7 @@ import html
 def generate_ytt(ordered_sections, output_path):
 
 	# Time delay in second for chat, to sync with video. For me, 7s looks like it's in sync with what the video display
-	delta = 7
+	delta = 0
 	# Duration of display of the line
 	duration = 10
 	# Size of the font. Supposed to be in percent of standart, but it looks like all sizes aren't available
