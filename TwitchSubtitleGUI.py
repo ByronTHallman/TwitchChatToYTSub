@@ -5,6 +5,8 @@ from CTkRangeSlider import *
 import customtkinter
 import tkinter
 import json
+import re #Used to identify chatter name colors from the json
+import tkinter.font as tkfont #Monospace font for the chatlog viewer.
 import random
 import threading # important for downloading
 from datetime import datetime, timedelta # importing time and date to get downloaded vod dates from first message.
@@ -236,9 +238,198 @@ def ImportURL():
 #--------------------------------------------------------------------------
 # CHATLOG / SECTION MANAGEMENT
 
+#Chatlog Viewer. A scrollable list: timestamp on the left, then the colored name and the message. Section text is highlighted as a block.
+DEFAULT_COLOR = "#bbbbbb" #Used when a chatter has no color in the json
+viewerJson = -1 #Index in jsonData of the chatlog being shown
+viewerSection = -1 #Index in sectionList of the selected section, or -1 when a plain chatlog is shown
+editedOnly = False #True = hide every message that isn't inside a section
+
+#Used to sort messages by their time. A message is (seconds, name, body, name color), so its time is the first item.
+def GetMessageTime(message):
+    return message[0]
+
+#Reads one comment and returns (seconds, name, body, name color), or None if it can't be read.
+#Twitch json files use content_offset_seconds / commenter / message.body / message.user_color.
+#Chat-downloader style files use time_in_seconds / author / message (plain text) / author.colour.
+def ParseComment(comment):
+    seconds = comment.get("content_offset_seconds")
+    if seconds is None:
+        seconds = comment.get("time_in_seconds")
+    if seconds is None:
+        return None
+
+    name = ""
+    color = None
+    if "commenter" in comment:
+        name = comment["commenter"].get("display_name", "")
+    elif "author" in comment:
+        name = comment["author"].get("display_name", "")
+        color = comment["author"].get("colour")
+
+    message = comment.get("message", "")
+    if isinstance(message, dict):
+        body = message.get("body", "")
+        if message.get("user_color") is not None:
+            color = message.get("user_color")
+    else:
+        body = message
+
+    #A valid color looks like #1E90FF. Anything else (missing, null, odd text) gets the default color.
+    if color is None or re.fullmatch(r"#[0-9a-fA-F]{6}", str(color)) is None:
+        color = DEFAULT_COLOR
+    return (seconds, str(name), str(body).replace("\n", " "), color)
+
+#Returns a sorted list of (seconds, name, body, name color) for one imported chatlog.
+def LoadMessages(index):
+    entry = jsonData[index]
+    comments = entry.get("comments") #URL imports already hold their comments in memory
+    if comments is None:
+        try:
+            with open(entry["path"], "r", encoding="utf-8") as json_file:
+                data = json.load(json_file)
+        except (OSError, json.JSONDecodeError) as error:
+            messagebox.showerror("Viewer error", f"Could not read this chatlog:\n{error}")
+            return []
+        if isinstance(data, list):
+            comments = data #some files are only a list of comments
+        else:
+            comments = data.get("comments", [])
+
+    messages = []
+    for comment in comments:
+        try:
+            parsed = ParseComment(comment)
+        except (TypeError, AttributeError):
+            continue #skip comments that aren't shaped like we expect
+        if parsed is not None:
+            messages.append(parsed)
+    messages.sort(key=GetMessageTime)
+    return messages
+
+#Sections is a list of (position in sectionList, section dict) for this chatlog.
+#Returns (rows, firstRow). rows is a list of (timestamp, name, name color, body, tag), tag is "out" or "sec<position>".
+#firstRow maps position -> index of that section's first row.
+def BuildViewerRows(messages, sections, selected, editedOnlyMode):
+    rows = []
+    firstRow = {}
+    for t, name, body, color in messages:
+        #Collect every section that contains this message.
+        matchingSections = []
+        for position, section in sections:
+            if section["start"] <= t <= section["end"]:
+                matchingSections.append(position)
+
+        if len(matchingSections) > 0:
+            #In cases of a selected section already having a color, the color will not change
+            chosenPosition = matchingSections[0]
+            for position in matchingSections:
+                if position == selected:
+                    chosenPosition = position
+            tag = "sec" + str(chosenPosition)
+            if chosenPosition not in firstRow:
+                firstRow[chosenPosition] = len(rows) #remember where this section first shows up
+        else:
+            if editedOnlyMode:
+                continue
+            tag = "out"
+        rows.append((SecToString(int(t)), name, color, body, tag))
+    return rows, firstRow
+
+#Turns rows into the text to insert and the character ranges to tag.
+#Returns (text, ranges, stampWidth). ranges maps tag -> list of (line, startColumn, endColumn), lines start at 1.
+def BuildViewerText(rows):
+    #Find the longest timestamp so the timestamp column lines up.
+    stampWidth = 0
+    for row in rows:
+        if len(row[0]) > stampWidth:
+            stampWidth = len(row[0])
+
+    lines = []
+    ranges = {}
+
+    #Adds one (line, startColumn, endColumn) range to a tag's list, creating the list the first time.
+    def AddRange(tag, line, startColumn, endColumn):
+        if tag not in ranges:
+            ranges[tag] = []
+        ranges[tag].append((line, startColumn, endColumn))
+    
+    for n, (stamp, name, color, body, tag) in enumerate(rows, start=1):
+        head = stamp.ljust(stampWidth) + "  "
+        label = name + ":"
+        line = head + label + " " + body
+        nameStart = len(head)
+        nameEnd = nameStart + len(label)
+        lines.append(line)
+        AddRange("ts", n, 0, stampWidth)
+        AddRange("nm" + color[1:], n, nameStart, nameEnd) #one tag per name color, like nm1E90FF
+        if tag == "out":
+            AddRange(tag, n, nameEnd, len(line)) #only the message text is gray
+        else:
+            AddRange(tag, n, 0, None) #the whole line, so the section is highlighted as a block
+    return "\n".join(lines), ranges, stampWidth
+
+#Redraws the viewer from viewerJson / viewerSection / editedOnly.
+#scroll=True jumps to the selected section. keep=True stays at the current scroll position.
+def RenderViewer(scroll=False, keep=False):
+    global viewerSection
+    if viewerJson < 0 or viewerJson >= len(jsonData):
+        return
+    if not (0 <= viewerSection < len(sectionList) and sectionList[viewerSection]["json"] == viewerJson):
+        viewerSection = -1 #the selected section was deleted or belongs to another chatlog
+    #Collect the sections that belong to the chatlog being shown, along with their position in sectionList.
+    sections = []
+    for position, section in enumerate(sectionList):
+        if section["json"] == viewerJson:
+            sections.append((position, section))
+    rows, firstRow = BuildViewerRows(LoadMessages(viewerJson), sections, viewerSection, editedOnly)
+    if not rows:
+        rows = [("", "", DEFAULT_COLOR, "No edited text in this chatlog yet." if editedOnly else "This chatlog has no messages.", "out")]
+    text, ranges, stampWidth = BuildViewerText(rows)
+    previous = viewer.yview()[0]
+
+    viewer.configure(state="normal")
+    viewer.delete("1.0", "end")
+    viewer.tag_config("ts", foreground="#6fa8dc")
+    viewer.tag_config("out", foreground="#8a8a8a")
+    viewer.tag_config("hang", lmargin2=viewerFont.measure("0") * (stampWidth + 2)) #wrapped lines line up under the message
+    for position, section in sections:
+        viewer.tag_config("sec" + str(position), background=section["color"], foreground="#ffffff")
+    viewer.insert("1.0", text)
+    viewer.tag_add("hang", "1.0", "end")
+    for tag, spans in ranges.items():
+        if tag.startswith("nm"):
+            viewer.tag_config(tag, foreground="#" + tag[2:])
+            viewer.tag_raise(tag) #name color must win over the block's white text
+        indexes = []
+        for line, startColumn, endColumn in spans:
+            indexes.append(f"{line}.{startColumn}")
+            if endColumn is None:
+                indexes.append(f"{line + 1}.0") #start of the next line, so the line break is included
+            else:
+                indexes.append(f"{line}.{endColumn}")
+        for i in range(0, len(indexes), 2000): #tag many ranges per call, much faster than one by one
+            viewer.tag_add(tag, *indexes[i:i + 2000])
+    viewer.tag_raise("ts")
+    viewer.configure(state="disabled")
+
+    viewer.yview_moveto(previous if keep else 0)
+    if scroll and viewerSection in firstRow:
+        viewer.yview(f"{firstRow[viewerSection] + 1}.0") #put the section's first message at the top
+
+def ToggleEditedOnly():
+    global editedOnly
+    editedOnly = not editedOnly
+    editedOnlyButton.configure(text="Show full chatlog" if editedOnly else "Show only edited text")
+    RenderViewer(scroll=True)
+
+
+#Change 11/8/26: SelectJson now also tells the viewer which chatlog to show.
 def SelectJson(index):
-    global currentJson
+    global currentJson, viewerJson, viewerSection 
     currentJson = index
+    viewerJson = index
+    viewerSection = -1 
+    RenderViewer() #Draw it.
     currentChatlogText.configure(
         text="Current Chatlog: " + jsonData[currentJson]["name"]
     )
@@ -289,8 +480,13 @@ def CreateSection():
     return
 
 def SelectSection(index):
-    global currentSection
+    global currentSection, viewerJson, viewerSection #Change 11/8/26: Added viewerJson, viewerSection.
     currentSection = index
+    #11/8/26: START: show the section's chatlog in the viewer, color-coded, scrolled to the section.
+    if 0 <= index < len(sectionList):
+        viewerJson = sectionList[index]["json"]
+        viewerSection = index
+        RenderViewer(scroll=True)
     return
 
 def SwapSections(index1, index2):
@@ -646,6 +842,7 @@ def UpdateTimelinePlayhead(slider, tracking_line, base_y, tracking_value, second
 #--------------------------------------------------------------------------
 #Defining general App sections. leftSide, sectionEditor
 app.grid_rowconfigure(0, weight=1)
+app.grid_rowconfigure(1, weight=1)
 app.grid_columnconfigure(1, weight=1)
 leftSide = customtkinter.CTkFrame(master=app)
 leftSide.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
@@ -761,6 +958,39 @@ createSectionButton = customtkinter.CTkButton(master=sectionAdder, text="Create 
 createSectionButton.grid(row=4, column=0, padx=5, pady=(10,15), sticky="n")
 
 #--------------------------------------------------------------------------
+#Middle Section Scroller. The chatlog viewer. Its scrollbar is its own and is NOT connected to any slider as of right now.
+viewerFrame = customtkinter.CTkFrame(master=app)
+viewerFrame.grid(row=1, column=1, padx=10, pady=(0, 10), sticky="nsew")
+viewerFrame.grid_columnconfigure(0, weight=1)
+viewerFrame.grid_rowconfigure(1, weight=1)
+
+editedOnlyButton = customtkinter.CTkButton(master=viewerFrame, text="Show only edited text", command=ToggleEditedOnly)
+editedOnlyButton.grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+
+viewerFont = tkfont.Font(family="Courier New", size=11) #Monospace so the timestamp column lines up
+
+#The text box is created first, so the scrollbar can be connected to it directly.
+viewer = tkinter.Text(
+    viewerFrame,
+    height=8,
+    wrap="word",
+    font=viewerFont,
+    bg="#202020",
+    fg="#ffffff",
+    borderwidth=0,
+    highlightthickness=0,
+    padx=8,
+    pady=6,
+    state="disabled"
+)
+viewer.grid(row=1, column=0, padx=(5, 0), pady=(0, 5), sticky="nsew")
+
+viewerScrollbar = customtkinter.CTkScrollbar(master=viewerFrame, orientation="vertical", command=viewer.yview)
+viewerScrollbar.grid(row=1, column=1, padx=(0, 5), pady=(0, 5), sticky="ns")
+viewer.configure(yscrollcommand=viewerScrollbar.set)
+
+
+#--------------------------------------------------------------------------
 #Timelines. Where the currently selected JSON's timeline is displayed, and where the total YTT section view is displayed.
 timelines = tkinter.Canvas(
     app,
@@ -853,6 +1083,7 @@ def RedrawTimelines():
 
     # Update displayed time.
     sectionTotalTime.configure(text=f"Total Time: {SecToString(YTTDuration())}")
+    RenderViewer(keep=True) #Change 11/8/26: Refresh the viewer whenever sections are created, deleted or reordered.
     return
 
 
