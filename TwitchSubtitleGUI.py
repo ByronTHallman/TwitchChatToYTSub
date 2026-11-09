@@ -711,7 +711,25 @@ def ExportYTT():
 
     if not output_path:
         return
-        
+
+    #get subtitle settings
+    comment_font = fontOption.get()
+    try: 
+        font_size = int(fontSize.get() or "10")
+        comment_opacity = opacityOptions.get() / 100
+        comment_duration = float(durationOptions.get() or "10")
+
+        if font_size <= 0 or comment_duration <= 0:
+            raise ValueError
+
+    except ValueError:
+        messagebox.showwarning(
+            "Invalid Settings",
+            "Please enter a valid font size and comment duration."
+        )
+        return
+
+
     # Assemble the data for the backend in the exact order of sectionList
     ordered_sections = []
     for section in sectionList:
@@ -726,7 +744,7 @@ def ExportYTT():
 
     # Hand the ordered list directly to Berrin's module
     try:
-        yttconverter.generate_ytt(ordered_sections, output_path)
+        yttconverter.generate_ytt(ordered_sections, output_path, comment_font=comment_font, font_size=font_size, comment_opacity=comment_opacity, comment_duration=comment_duration)
         messagebox.showinfo("Success", f"YTT file generated successfully!\nSaved to: {output_path}")
     except Exception as error:
         messagebox.showerror("Export Failed", f"An error occurred during conversion:\n{error}")
@@ -843,7 +861,9 @@ def UpdateTimelinePlayhead(slider, tracking_line, base_y, tracking_value, second
 #Defining general App sections. leftSide, sectionEditor
 app.grid_rowconfigure(0, weight=1)
 app.grid_rowconfigure(1, weight=1)
-app.grid_columnconfigure(1, weight=1)
+app.grid_columnconfigure(0, weight=1, uniform="side")
+app.grid_columnconfigure(1, weight=2)
+app.grid_columnconfigure(2, weight=1, uniform="side")
 leftSide = customtkinter.CTkFrame(master=app)
 leftSide.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
 
@@ -856,7 +876,7 @@ rightSide.grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
 #--------------------------------------------------------------------------
 # leftSide. Importing and JSON visualizer.
 leftSide = customtkinter.CTkFrame(master=app)
-leftSide.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+leftSide.grid(row=0, column=0, rowspan=2, padx=10, pady=10, sticky="nsew")
 leftSide.grid_columnconfigure(0, weight=1)
 leftSide.grid_rowconfigure(2, weight=1)
 
@@ -880,7 +900,7 @@ jsonVisualizer.grid(row=2, column=0, padx=5, pady=5, sticky="nsew")
 #--------------------------------------------------------------------------
 #rightSide. Export and section editor.
 rightSide = customtkinter.CTkFrame(master=app)
-rightSide.grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
+rightSide.grid(row=0, column=2, rowspan=2, padx=10, pady=10, sticky="nsew")
 rightSide.grid_columnconfigure(0, weight=1)
 rightSide.grid_rowconfigure(1, weight=1)
 
@@ -902,6 +922,36 @@ sectionEditorTitle.configure(font = ("Roboto", 15))
 sectionTotalTime = customtkinter.CTkLabel(master = sectionEditorTitle, text=f"Total Time: {SecToString(YTTDuration())}")
 sectionTotalTime.grid_rowconfigure(1, weight=0)
 sectionTotalTime.grid(row=1, column=0, padx=0, pady=0, sticky="ew")
+
+#----------------------------------------------------------------------------------------------
+#subtitle settings
+output = customtkinter.CTkFrame(master=rightSide)
+output.grid(row=2, column=0, padx=10, pady=(0, 10), sticky="ew")
+output.grid_columnconfigure(1, weight=1)
+
+title = customtkinter.CTkLabel(master=output, text="Subtitle Settings", font=("Roboto", 13))
+title.grid(row=0, column=0, columnspan=2, pady=(4, 2))
+
+#font and size options
+customtkinter.CTkLabel(master=output, text="Font:").grid(row=1, column=0, padx=(8, 4), pady=2, sticky="w")
+fontOption = customtkinter.CTkOptionMenu(master=output, values=["Sans-serif", "Serif", "Monospace", "Casual", "Cursive", "Small Caps"], height=24)
+fontOption.grid(row=1, column=1, padx=(0, 8), pady=2, sticky="ew")
+
+customtkinter.CTkLabel(master=output, text="Size:").grid(row=2, column=0, padx=(8, 4), pady=2, sticky="w")
+fontSize = customtkinter.CTkEntry(master=output, placeholder_text="10", height=24)
+fontSize.insert(0, "10")
+fontSize.grid(row=2, column=1, padx=(0, 8), pady=2, sticky="ew")
+
+#duration and opacity options
+customtkinter.CTkLabel(master=output, text="Opacity:").grid(row=3, column=0, padx=(8, 4), pady=2, sticky="w")
+opacityOptions = customtkinter.CTkSlider(master=output, from_=0, to=100, number_of_steps=100, height=14)
+opacityOptions.set(100)
+opacityOptions.grid(row=3, column=1, padx=(0, 8), pady=2, sticky="ew")
+
+customtkinter.CTkLabel(master=output, text="Secs:").grid(row=4, column=0, padx=(8, 4), pady=(2, 6), sticky="w")
+durationOptions = customtkinter.CTkEntry(master=output, placeholder_text="10", height=24)
+durationOptions.insert(0, "10")
+durationOptions.grid(row=4, column=1, padx=(0, 8), pady=(2, 6), sticky="ew")
 
 #--------------------------------------------------------------------------
 #sectionAdder. Where the user adds a new JSON section to the sectionEditor.
@@ -951,7 +1001,7 @@ secEnd = customtkinter.CTkEntry(timeEntry, placeholder_text="s")
 secEnd.grid(row=0, column=10, padx=(0, 5), pady=5, sticky="n")
 secEnd.configure(width=30, justify="center")
 
-createSectionRangeSlider = CTkRangeSlider(master=sectionAdder, from_=0, to=100, width=900, command=SectionSliderDragged)
+createSectionRangeSlider = CTkRangeSlider(master=sectionAdder, from_=0, to=100, width=600, command=SectionSliderDragged)
 createSectionRangeSlider.grid(row=3, column=0, padx=5, pady=2, sticky="ew")
 
 createSectionButton = customtkinter.CTkButton(master=sectionAdder, text="Create Section", command=CreateSection)
@@ -994,12 +1044,12 @@ viewer.configure(yscrollcommand=viewerScrollbar.set)
 #Timelines. Where the currently selected JSON's timeline is displayed, and where the total YTT section view is displayed.
 timelines = tkinter.Canvas(
     app,
-    width=400,
+    width=1000,
     height=300,
     bg="#202020", #Matching canvas with customtkinter color
     highlightthickness=0
 )
-timelines.grid(row=4, column=0, columnspan=3, sticky="nsew")
+timelines.grid(row=4, column=0, columnspan=3)
 
 # Add line + time value tracked with chatlog slider handle.
 chatlogPlayheadLine = timelines.create_line(50, jsonLine - 25, 50, jsonLine + 15, fill="#1f538d", width=2)

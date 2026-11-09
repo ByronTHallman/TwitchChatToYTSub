@@ -7,21 +7,26 @@ import html
 
 #Kai Change 10/28/26: Refactored into a function, as dictionaries can be passed in by other scripts calling it.
 #Todo: Pass in other variables like delta, duration, size, etc. Delta may be deprecated entirely for another feature
-def generate_ytt(ordered_sections, output_path):
+def generate_ytt(ordered_sections, output_path, comment_font="Sans-serif", font_size=10, comment_opacity=1.0, comment_duration=10):
 
 	# Time delay in second for chat, to sync with video. For me, 7s looks like it's in sync with what the video display
 	delta = 0
 	# Duration of display of the line
-	duration = 10
+	duration = comment_duration
 	# Size of the font. Supposed to be in percent of standart, but it looks like all sizes aren't available
-	size = 10
+	size = font_size
 	# Bacground color. The standart of YT is solid black
 	background_color = "#000000"
 	# Opacity of the background color. Between 0 and 254. 254 means that the color is not transparent
 	background_opacity = 200
+	font_styles = {
+		"Sans-serif": 4, "Serif": 2, "Monospace": 3,
+		"Casual": 5, "Cursive": 6, "Small Caps": 7
+	}
+	fs = font_styles.get(comment_font, 4)
 	header = '<?xml version="1.0" encoding="utf-8"?><timedtext format="3"><head><wp id="0" ap="7" ah="0" av="0" /><wp id="1" ap="6" ah="0" av="100" /><ws id="0" ju="2" pd="0" sd="0" /><ws id="1" ju="0" pd="0" sd="0" />'
-	middle = '</head><body>'
 	footer = '</body></timedtext>'
+	middle = '</head><body>'
 	spacer = '<s p="1">​\n​</s>'
 
 	output = ''
@@ -91,7 +96,7 @@ def generate_ytt(ordered_sections, output_path):
 
 	lengthColors = len(colors)
 	for i in range(lengthColors):
-		header += '<pen id="'+str(i)+'" sz="'+str(size)+'" fc="'+colors[i]+'" fo="254" bc="'+background_color+'" bo="'+str(background_opacity)+'" />'
+		header += '<pen id="'+str(i)+'" sz="'+str(size)+'" fs="'+str(fs)+'" fc="'+colors[i]+'" fo="'+str(int(comment_opacity * 254))+'" bc="'+background_color+'" bo="'+str(background_opacity)+'" />'
 
 	timestamps.sort(key=lambda x: x[0])
 
