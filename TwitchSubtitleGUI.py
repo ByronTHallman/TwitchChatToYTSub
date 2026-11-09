@@ -1,6 +1,7 @@
 import atexit
 import tempfile
 import os # for handling download management
+from CTkRangeSlider import *
 import customtkinter
 import tkinter
 import json
@@ -32,10 +33,12 @@ app = customtkinter.CTk()  # creates the window
 app.geometry("1000x800")
 app.resizable(False, False) #The timelines sorta break if the window is resizable.
 app.title("where even am i")
+app.focus_force()
 
+# Universal global variables
 jsonData = [] #List of dictionaries. "path", "name", "endTime"
 currentJson = -1 #The index of the current JSON in jsonData
-sectionList = [] #List of dictionaries. "json", "start", "end", "button", "ogIndex", "color"
+sectionList = [] #List of dictionaries. "json", "start", "end", "button", "ogIndex", "color", ""
 currentSection = -1 #The index of the current section in sectionList
 colors = [ #Some hand-picked OKLCH colors
     "#973c5d", "#964601", "#4c6c01", "#04733a",
@@ -43,29 +46,18 @@ colors = [ #Some hand-picked OKLCH colors
 ]
 lastColor = "#000000" #The last used color so we don't use it again
 
+# Timeline and specific numeric global variables.
+timelineMinx = 50 # The lefthand side of the timelines.
+timelineMaxx = 950 # The righthand side of the timelines.
+timelineMark = 8 # The delta y values of each mark on the timeline
+jsonLine = 90 # The y values of the current chatlog timeline.
+yttLine = 240 # The y values of the output timeline.
+chatlogPlayheadValue = 0 # Global variable storing first timeline playhead value for access.
+outputPlayheadValue = 0 #Global variable storing second timeline playhead value for access.
+
+# Tempfile global variables
 tempDownloads = [] #Any file downloaded by URL will be added to this list to be removed on shutdown
 tempDir = tempfile.gettempdir()
-
-#--------------------------------------------------------------------------
-#Keyboard Input
-def KeyPress(event): #No switch statement cus I don't want to mess with python versions
-    global currentSection
-    if event.keysym == "Up":
-        if currentSection > 0:
-            SwapSections(currentSection, currentSection - 1)
-            currentSection = currentSection - 1
-            RedrawTimelines()
-    elif event.keysym == "Down":
-        if currentSection < len(sectionList) - 1:
-            SwapSections(currentSection, currentSection + 1)
-            currentSection = currentSection + 1
-            RedrawTimelines()
-    elif event.keysym == "Delete":
-        if isinstance(app.focus_get(), customtkinter.CTkEntry):
-            return  # Let the entry handle Delete normally
-        else:
-            DeleteSection(currentSection)
-app.bind("<KeyPress>", KeyPress)
 
 #--------------------------------------------------------------------------
 #Functions
@@ -241,12 +233,22 @@ def ImportURL():
     #Program froze on download unless threading was brought in.
     threading.Thread(target=download, daemon=True).start()
 
+#--------------------------------------------------------------------------
+# CHATLOG / SECTION MANAGEMENT
+
 def SelectJson(index):
     global currentJson
     currentJson = index
     currentChatlogText.configure(
         text="Current Chatlog: " + jsonData[currentJson]["name"]
     )
+
+    endTime = jsonData[currentJson]["endTime"]
+    createSectionRangeSlider.configure(to=endTime)
+    createSectionRangeSlider.set((0, endTime)) # Reset knobs to start and end
+    
+    # Force text boxes to match the new reset slider
+    SectionSliderDragged([0, endTime])
     return
 
 def CreateSection():
@@ -280,11 +282,43 @@ def CreateSection():
         command=lambda index=len(sectionList): SelectSection(index)
     )
     sectionButton.configure(fg_color = color, hover = False)
-    sectionList.append({"json":currentJson, "start":start, "end":end, "button":sectionButton, "ogIndex":len(sectionList), "color":color})
+    sectionList.append({"json":currentJson, "start":start, "end":end, "button":sectionButton, "ogIndex":len(sectionList), "color":color, "jsonIndex":currentJson})
     sectionButton.grid(row=len(sectionList), column=0, padx=5, pady=5, sticky="nsew")
     SelectSection(len(sectionList))
     RedrawTimelines()
     return
+
+def SelectSection(index):
+    global currentSection
+    currentSection = index
+    return
+
+def SwapSections(index1, index2):
+    global sectionList
+    sectionList[index1]["button"].configure(command=lambda index=index2: SelectSection(index)) #swapping lamda commands
+    sectionList[index2]["button"].configure(command=lambda index=index1: SelectSection(index))
+    sectionList[index1]["button"].grid(row=index2 + 1) #swapping location in sectionEditor
+    sectionList[index2]["button"].grid(row=index1 + 1)
+    sectionList[index1], sectionList[index2] = sectionList[index2], sectionList[index1] #swapping sectionList elements using tuple unpacking
+    return
+
+def DeleteSection(index):
+    global sectionList
+    for i in range(index, len(sectionList)-1): #From index to second last index
+        SwapSections(i, i+1)
+    sectionList[-1]["button"].destroy()
+    sectionList.pop(index)
+    RedrawTimelines()
+    return
+
+# Ensures section colors aren't repeated in sequence.
+def GenerateColor():
+    global lastColor
+    color = random.choice(colors)
+    while color == lastColor:
+        color = random.choice(colors)
+    lastColor = color
+    return color
 
 # Checks whether the section timestamps make sense, and updates the end accordingly.
 # Seems to be a less friction-inducing implementation.
@@ -304,6 +338,80 @@ def ValidateEnd(start, end, maxEnd):
 
     # Leave end unchanged if valid.
     return end
+
+#--------------------------------------------------------------------------
+# Parsing helper functions
+
+def StampToSec(hours, minutes, seconds):
+    sec = hours * 3600 + minutes * 60 + seconds
+    return sec
+
+def SecToString(seconds):
+    hours = int(seconds // 3600)
+    seconds = seconds % 3600
+    minutes = int(seconds // 60)
+    seconds = seconds % 60
+    if seconds % 1 == 0:
+        # If whole number seconds.
+        return f"{hours:02}:{minutes:02}:{int(seconds):02}"
+    else:
+        # If there are fractional seconds. Take off unnecessary zeroes from the right.
+        return f"{hours:02}:{minutes:02}:{seconds:05.2f}".rstrip('0')
+
+#--------------------------------------------------------------------------
+# Formatting helper functions
+
+# Takes downloaded Twitch chat
+# and formats it to best fit the
+# style that the rest of this program expects.
+def CommentFormatter(comment):
+    return {
+        'commenter': {
+                'display_name': comment.get('author', {}).get('display_name', '')
+        },
+        'message': {
+                'body': comment.get('message', ''),
+                'user_color': comment.get('author', {}).get('colour')
+        },
+        'content_offset_seconds': comment.get('time_in_seconds', 0.0)
+    }
+
+# Writes the string for the Chatlog list labels.
+def CreateLabel(metadata, vod_chat):
+    # TODO: Make the logical organization of this less ridiculously stupid.
+    if vod_chat:
+        media_type = getattr(vod_chat, 'video_type', 'unknown')
+        if media_type == "video":
+            return f"{metadata['streamer']}, {metadata['date']}\nGame: {metadata['game']}"
+        elif media_type == "clip":
+            return f"Clip: {metadata['date']}"
+        else:
+            return f"Invalid Chatlog"
+    else:
+        return f"{metadata['streamer']}, {metadata['date']}\nGame: {metadata['game']}"
+
+#--------------------------------------------------------------------------
+# Global timing info helper functions
+
+# Returns the total time elapsed in the output file.
+def YTTDuration():
+    totalTime = 0
+    for section in sectionList:
+        totalTime += section["end"] - section["start"] #+ 1 I don't really understand this +1 so removing it, very sorry #times are inclusive so I'm adding 1
+    return totalTime
+
+# Returns a list of all the starting times of the sections relative to each cumulative addition.
+def SectionStarts():
+    totalTime = 0
+    starts = []
+    for section in sectionList:
+        starts.append(totalTime)
+        totalTime += section["end"] - section["start"] #+ 1 I don't really undestand this +1 so removing it, very sorry #times are inclusive so I'm adding 1
+    starts.append(totalTime)
+    return starts
+
+#--------------------------------------------------------------------------
+# Import/download-related helper functions
 
 # For tempfile management, extracts VOD ID for use as a backend label.
 def WriteID(vod_url):
@@ -372,11 +480,13 @@ def ImportMetadataJSON(imported_data, json_comments = []):
     json_date_part = json_date_data.split("T")[0] if json_date_data else '00-00-00'
     year, month, day = json_date_part.split("-")
 
-    # Create label.
+    # Create label. Get duration from metadata, otherwise fall back to last message time value.
     json_streamer = json_streamer_data.get('name') if json_streamer_data else 'Unknown'
     json_game = json_chapter_data[0].get('gameDisplayName') if json_chapter_data and len(json_chapter_data) > 0 else 'Unknown'
     json_date = f"{month}/{day}/{year[-2:]}" if json_date_data != None else 'Unknown Date'
-    json_duration = json_video_data.get('end', 0)
+    json_lastmsg = json_comments[-1] if json_comments else None
+    json_lastsec = json_lastmsg.get("content_offset_seconds", json_lastmsg.get("time_in_seconds", 0))
+    json_duration = json_video_data.get('end', 0) if json_video_data else json_lastsec
 
     # Return as metadata dictionary, along with "comments" to be parsed for time.
     return{
@@ -387,155 +497,8 @@ def ImportMetadataJSON(imported_data, json_comments = []):
         'comments': json_comments
     }
 
-# Takes downloaded Twitch chat
-# and formats it to best fit the
-# style that the rest of this program expects.
-def CommentFormatter(comment):
-    return {
-        'commenter': {
-                'display_name': comment.get('author', {}).get('display_name', '')
-        },
-        'message': {
-                'body': comment.get('message', ''),
-                'user_color': comment.get('author', {}).get('colour')
-        },
-        'content_offset_seconds': comment.get('time_in_seconds', 0.0)
-    }
-
-# Writes the string for the Chatlog list labels.
-def CreateLabel(metadata, vod_chat):
-    # TODO: Make the logical organization of this less ridiculously stupid.
-    if vod_chat:
-        media_type = getattr(vod_chat, 'video_type', 'unknown')
-        if media_type == "video":
-            return f"{metadata['streamer']}, {metadata['date']}\nGame: {metadata['game']}"
-        elif media_type == "clip":
-            return f"Clip: {metadata['date']}"
-        else:
-            return f"Invalid Chatlog"
-    else:
-        return f"{metadata['streamer']}, {metadata['date']}\nGame: {metadata['game']}"
-
-def SelectSection(index):
-    global currentSection
-    currentSection = index
-    return
-
-def SwapSections(index1, index2):
-    global sectionList
-    sectionList[index1]["button"].configure(command=lambda index=index2: SelectSection(index)) #swapping lamda commands
-    sectionList[index2]["button"].configure(command=lambda index=index1: SelectSection(index))
-    sectionList[index1]["button"].grid(row=index2 + 1) #swapping location in sectionEditor
-    sectionList[index2]["button"].grid(row=index1 + 1)
-    sectionList[index1], sectionList[index2] = sectionList[index2], sectionList[index1] #swapping sectionList elements using tuple unpacking
-    return
-
-def DeleteSection(index):
-    global sectionList
-    for i in range(index, len(sectionList)-1): #From index to second last index
-        SwapSections(i, i+1)
-    sectionList[-1]["button"].destroy()
-    sectionList.pop(index)
-    RedrawTimelines()
-    return
-
-def StampToSec(hours, minutes, seconds):
-    sec = hours * 3600 + minutes * 60 + seconds
-    return sec
-
-def SecToString(seconds):
-    hours = int(seconds // 3600)
-    seconds = seconds % 3600
-    minutes = int(seconds // 60)
-    seconds = seconds % 60
-    if seconds % 1 == 0:
-        # If whole number seconds.
-        return f"{hours:02}:{minutes:02}:{int(seconds):02}"
-    else:
-        # If there are fractional seconds. Take off unnecessary zeroes from the right.
-        return f"{hours:02}:{minutes:02}:{seconds:05.2f}".rstrip('0')
-
-# Returns the total time elapsed in the output file.
-def YTTDuration():
-    totalTime = 0
-    for section in sectionList:
-        totalTime += section["end"] - section["start"] #+ 1 I don't really understand this +1 so removing it, very sorry #times are inclusive so I'm adding 1
-    return totalTime
-
-# Returns a list of all the starting times of the sections relative to each cumulative addition.
-def SectionStarts():
-    totalTime = 0
-    starts = []
-    for section in sectionList:
-        starts.append(totalTime)
-        totalTime += section["end"] - section["start"] #+ 1 I don't really undestand this +1 so removing it, very sorry #times are inclusive so I'm adding 1
-    starts.append(totalTime)
-    return starts
-
-def RedrawTimelines():
-    timelines.delete("sections")
-
-    timelines.create_line(timelineMinx, jsonLine, timelineMaxx, jsonLine, fill="white")
-    timelines.create_line(timelineMinx, jsonLine + timelineMark + 5, timelineMinx, jsonLine - timelineMark - 5, fill="white")
-    timelines.create_line(timelineMaxx, jsonLine + timelineMark + 5, timelineMaxx, jsonLine - timelineMark - 5, fill="white")
-
-    timelines.create_line(timelineMinx, yttLine, timelineMaxx, yttLine, fill="white")
-    timelines.create_line(timelineMinx, yttLine + timelineMark + 5, timelineMinx, yttLine - timelineMark - 5, fill="white")
-    timelines.create_line(timelineMaxx, yttLine + timelineMark + 5, timelineMaxx, yttLine - timelineMark - 5, fill="white")
-
-    duration = YTTDuration()
-    starts = SectionStarts()
-    timelineLength = timelineMaxx - timelineMinx
-
-    timelines.create_text(
-        500, jsonLine - 55,
-        text="Current Chatlog",
-        fill="white",
-        font=("Roboto", 13),
-        anchor="center"
-    )
-
-    timelines.create_text(
-        500, yttLine - 55,
-        text="Output File",
-        fill="white",
-        font=("Roboto", 13),
-        anchor="center"
-    )
-
-    i = 0
-    for section in sectionList:
-        if section["json"] == currentJson:
-            jsonLength = jsonData[currentJson]["endTime"]
-            jsonxS = (section["start"]/jsonLength * timelineLength) + timelineMinx + 1
-            jsonxE = (section["end"]/jsonLength * timelineLength) + timelineMinx - 1
-            timelines.create_line(jsonxS, jsonLine + timelineMark, jsonxS, jsonLine - timelineMark, fill=section["color"], tags="sections")
-            timelines.create_line(jsonxE, jsonLine + timelineMark, jsonxE, jsonLine - timelineMark, fill=section["color"], tags="sections")
-            timelines.create_line(jsonxS, jsonLine - timelineMark, jsonxE, jsonLine - timelineMark, fill=section["color"], tags="sections")
-
-        yttxS = ((starts[i]/duration) * timelineLength) + timelineMinx + 1
-        yttxE = (((starts[i+1])/duration) * timelineLength) + timelineMinx - 1
-        timelines.create_line(yttxS, yttLine + timelineMark, yttxS, yttLine - timelineMark, fill=section["color"], tags="sections")
-        timelines.create_line(yttxE, yttLine + timelineMark, yttxE, yttLine - timelineMark, fill=section["color"], tags="sections")
-        timelines.create_line(yttxS, yttLine - timelineMark, yttxE, yttLine - timelineMark, fill=section["color"], tags="sections")
-        i += 1
-
-    # Keep the slider tracking lines on top!
-    timelines.tag_raise(chatlogTrackingLine)
-    timelines.tag_raise(outputTrackingLine)
-
-    # Update displayed time.
-    sectionTotalTime.configure(text=f"Total Time: {SecToString(YTTDuration())}")
-    return
-
-def GenerateColor():
-    global lastColor
-    color = random.choice(colors)
-    while color == lastColor:
-        color = random.choice(colors)
-    lastColor = color
-    return color
-
+#--------------------------------------------------------------------------
+# Exporting
 # The primary merging implementation, sends data to Berrin's converter and executes it. 
 def ExportYTT():
     if len(sectionList) == 0:
@@ -572,6 +535,114 @@ def ExportYTT():
     except Exception as error:
         messagebox.showerror("Export Failed", f"An error occurred during conversion:\n{error}")
 
+#--------------------------------------------------------------------------
+# Section editor slider functions
+
+def SectionSliderDragged(values):
+    sliderMin, sliderMax = values
+
+    if currentJson == -1 or sliderMax == 0:
+        return
+            
+    def UpdateBoxes(h_box, m_box, s_box, sliderLen):
+        total_sec = max(0, int(sliderLen))
+        h, rem = divmod(total_sec, 3600)
+        m, s = divmod(rem, 60)
+        
+        h_box.delete(0, "end"), h_box.insert(0, str(h))
+        m_box.delete(0, "end"), m_box.insert(0, str(m))
+        s_box.delete(0, "end"), s_box.insert(0, str(s))
+
+    UpdateBoxes(hourStart, minStart, secStart, sliderMin) #update starts
+    UpdateBoxes(hourEnd, minEnd, secEnd, sliderMax) #update ends
+
+def UpdateSectionHandles(event=None):
+    # Leave if there is no selected JSON.
+    if currentJson == -1:
+        return
+
+    try:
+        # Get start entries.
+        hS = int(hourStart.get() or "0")
+        mS = int(minStart.get() or "0")
+        sS = float(secStart.get() or "0")
+
+        # Get end entries.
+        hE = int(hourEnd.get() or "0")
+        mE = int(minEnd.get() or "0")
+        sE = float(secEnd.get() or "0")
+
+        # Identify length of current chatlog 
+        # and specified points.
+        maxEnd = jsonData[currentJson]["endTime"]
+        start_sec = StampToSec(hS, mS, sS)
+        end_sec = StampToSec(hE, mE, sE)
+
+        # Ensure start isn't below 0 or above max length.
+        start_sec = max(start_sec, 0)
+        start_sec = min(start_sec, maxEnd)
+
+        # Ensure end isn't above max.
+        end_sec = min(end_sec, maxEnd)
+
+        # Ignore logically invalid entries.
+        if start_sec >= end_sec or start_sec < 0:
+            return
+        
+        # Force slider knobs to new positions from entry.
+        createSectionRangeSlider.set((start_sec, end_sec))
+    except ValueError:
+        pass # Ignore incomplete/invalid typing.
+
+#--------------------------------------------------------------------------
+# Section timeline slider functions
+
+# Update title string.
+def UpdateTimelineTitles():
+    timelines.itemconfig(chatlogTimelineTitle, text=str(f"Current Chatlog: {chatlogPlayheadValue}"))
+    timelines.itemconfig(outputTimelineTitle, text=str(f"Output File: {outputPlayheadValue}"))  
+
+# Quickly update both timeline playhead lines and number values.
+def RefreshTimelinePlayheads():
+    UpdateTimelinePlayhead(chatlogSlider, chatlogPlayheadLine, jsonLine, chatlogPlayheadText, 
+                           (jsonData[currentJson].get('endTime', 0) if currentJson != -1 else 0))
+    UpdateTimelinePlayhead(outputSlider, outputPlayheadLine, yttLine, outputPlayheadText, YTTDuration())
+
+# Function for updating the position of the slider handle line.
+def UpdateTimelinePlayhead(slider, tracking_line, base_y, tracking_value, seconds_value):
+    global chatlogPlayheadValue, outputPlayheadValue
+
+    # Calculate percentage of timeline width.
+    sliderRange = slider.cget("to") - slider.cget("from_")
+    if sliderRange <= 0:
+        # No slider? No service. I honestly don't know why I am checking for this.
+        # It's to prevent division by zero, but I don't think we'll ever get to this point.
+        return
+
+    # Calculate current slider value, turn into seconds.
+    sliderPercent = (slider.get() - slider.cget("from_")) / sliderRange
+    track_width = timelineMaxx - timelineMinx
+    new_x = timelineMinx + (sliderPercent * track_width) + 1
+    timelineSeconds = int(seconds_value * sliderPercent)
+
+    # Move tracking line and value around timeline
+    timelines.coords(tracking_line, new_x, base_y - 25, new_x, base_y + 15)
+    timelines.coords(tracking_value, new_x, base_y - 35)
+    timelines.itemconfig(tracking_value, text=str(SecToString(timelineSeconds)))
+
+    # Update label variable.
+    UpdateTimelineTitles()                                          
+
+    if slider is chatlogSlider:
+        chatlogPlayheadValue = timelineSeconds
+    elif slider is outputSlider:
+        outputPlayheadValue = timelineSeconds
+
+    # Make sure the line is on top.
+    timelines.tag_raise(tracking_line)
+
+#--------------------------------------------------------------------------
+#----------------------------- INITIALIZE UI ------------------------------
 #--------------------------------------------------------------------------
 #Defining general App sections. leftSide, sectionEditor
 app.grid_rowconfigure(0, weight=1)
@@ -638,7 +709,7 @@ sectionTotalTime.grid(row=1, column=0, padx=0, pady=0, sticky="ew")
 #--------------------------------------------------------------------------
 #sectionAdder. Where the user adds a new JSON section to the sectionEditor.
 sectionAdder.grid_columnconfigure(0, weight=1)
-sectionAdder.grid_rowconfigure(3, weight=1)
+sectionAdder.grid_rowconfigure(4, weight=1)
 
 sectionAdderTitle = customtkinter.CTkLabel(master = sectionAdder, text="Create Subtitle Section")
 sectionAdderTitle.grid(row=0, column=0, padx=1, pady=(5, 0), sticky="ew")
@@ -683,8 +754,11 @@ secEnd = customtkinter.CTkEntry(timeEntry, placeholder_text="s")
 secEnd.grid(row=0, column=10, padx=(0, 5), pady=5, sticky="n")
 secEnd.configure(width=30, justify="center")
 
+createSectionRangeSlider = CTkRangeSlider(master=sectionAdder, from_=0, to=100, width=900, command=SectionSliderDragged)
+createSectionRangeSlider.grid(row=3, column=0, padx=5, pady=2, sticky="ew")
+
 createSectionButton = customtkinter.CTkButton(master=sectionAdder, text="Create Section", command=CreateSection)
-createSectionButton.grid(row=3, column=0, padx=5, pady=(10,15), sticky="n")
+createSectionButton.grid(row=4, column=0, padx=5, pady=(10,15), sticky="n")
 
 #--------------------------------------------------------------------------
 #Timelines. Where the currently selected JSON's timeline is displayed, and where the total YTT section view is displayed.
@@ -697,73 +771,124 @@ timelines = tkinter.Canvas(
 )
 timelines.grid(row=4, column=0, columnspan=3, sticky="nsew")
 
-# Timeline and specific numeric global variables.
-timelineMinx = 50 # The lefthand side of the timelines.
-timelineMaxx = 950 # The righthand side of the timelines.
-timelineMark = 8 # The delta y values of each mark on the timeline
-jsonLine = 90 # The y values of the current chatlog timeline.
-yttLine = 240 # The y values of the output timeline.
+# Add line + time value tracked with chatlog slider handle.
+chatlogPlayheadLine = timelines.create_line(50, jsonLine - 25, 50, jsonLine + 15, fill="#1f538d", width=2)
+chatlogPlayheadText = timelines.create_text(50, 55, text="00:00:00", fill="white")
+timelines.tag_raise(chatlogPlayheadLine)
+
+# Add line + time value tracked with output slider handle.
+outputPlayheadLine = timelines.create_line(50, yttLine - 25, 50, yttLine + 15, fill="#2b7a3d", width=2)
+outputPlayheadText = timelines.create_text(50, 205, text="00:00:00", fill="white")
+timelines.tag_raise(outputPlayheadLine)
+
+# Timeline Titles
+chatlogTimelineTitle = timelines.create_text(500, jsonLine - 55,
+    text=f"Current Chatlog: {chatlogPlayheadValue}", 
+    fill="white", font=("Roboto", 13), anchor="center")
+
+outputTimelineTitle = timelines.create_text(500, yttLine - 55,
+    text=f"Output File: {outputPlayheadValue}",
+    fill="white", font=("Roboto", 13), anchor="center")
 
 # Slider object for the chatlog timeline.
 chatlogSlider = customtkinter.CTkSlider(
-    master=timelines, 
-    from_=0, 
-    to=100, 
-    width=916,
+    master=timelines, from_=0, to=100, width=916,
     fg_color = "#202020",
-    bg_color="transparent",
-    progress_color="transparent",
-    command=lambda val: UpdateSliderLine(chatlogSlider, chatlogTrackingLine, jsonLine, chatlogTrackingValue, (jsonData[currentJson].get('endTime', 0) if currentJson != -1 else 0))
+    bg_color="transparent", progress_color="transparent",
+    command=lambda val: UpdateTimelinePlayhead(chatlogSlider, chatlogPlayheadLine, jsonLine, chatlogPlayheadText, (jsonData[currentJson].get('endTime', 0) if currentJson != -1 else 0))
 )
 chatlogSlider.place(x=43, y=102), chatlogSlider.set(0)
 
-# Add line + time value tracked with chatlog slider handle.
-chatlogTrackingLine = timelines.create_line(50, jsonLine - 25, 50, jsonLine + 15, fill="#1f538d", width=2)
-chatlogTrackingValue = timelines.create_text(50, 55, text="00:00:00", fill="white")
-timelines.tag_raise(chatlogTrackingLine)
-
 # Slider object for the output timeline.
 outputSlider = customtkinter.CTkSlider(
-    master=timelines, 
-    from_=0, 
-    to=100, 
-    width=916,
+    master=timelines, from_=0, to=100, width=916,
     fg_color = "#202020",
-    bg_color="transparent",
-    progress_color="transparent",
-    button_color="#2b7a3d",        
-    button_hover_color="#1e5c2d",
-    command=lambda val: UpdateSliderLine(outputSlider, outputTrackingLine, yttLine, outputTrackingValue, YTTDuration())
+    bg_color="transparent", progress_color="transparent",
+    button_color="#2b7a3d", button_hover_color="#1e5c2d",
+    command=lambda val: UpdateTimelinePlayhead(outputSlider, outputPlayheadLine, yttLine, outputPlayheadText, YTTDuration())
 )
 outputSlider.place(x=43, y=252), outputSlider.set(0)
 
-# Add line + time value tracked with output slider handle.
-outputTrackingLine = timelines.create_line(50, yttLine - 25, 50, yttLine + 15, fill="#2b7a3d", width=2)
-outputTrackingValue = timelines.create_text(50, 205, text="00:00:00", fill="white")
-timelines.tag_raise(outputTrackingLine)
+#--------------------------------------------------------------------------
+# Timeline Management
 
-# Function for updating the position of the slider handle line.
-def UpdateSliderLine(slider, tracking_line, base_y, tracking_value, seconds_value):
-    # Calculate percentage of timeline width.
-    sliderRange = slider.cget("to") - slider.cget("from_")
-    if sliderRange == 0:
-        # No slider? No service. I honestly don't know why I am checking for this.
-        return
+def RedrawTimelines():
+    timelines.delete("sections")
 
-    # Calculate current slider value, turn into seconds.
-    sliderPercent = (slider.get() - slider.cget("from_")) / sliderRange
-    track_width = timelineMaxx - timelineMinx
-    new_x = timelineMinx + (sliderPercent * track_width) + 1
-    timelineSeconds = int(seconds_value * sliderPercent)
+    timelines.create_line(timelineMinx, jsonLine, timelineMaxx, jsonLine, fill="white")
+    timelines.create_line(timelineMinx, jsonLine + timelineMark + 5, timelineMinx, jsonLine - timelineMark - 5, fill="white")
+    timelines.create_line(timelineMaxx, jsonLine + timelineMark + 5, timelineMaxx, jsonLine - timelineMark - 5, fill="white")
 
-    # Move tracking line and value around timeline
-    timelines.coords(tracking_line, new_x, base_y - 25, new_x, base_y + 15)
-    timelines.coords(tracking_value, new_x, base_y - 35)
-    timelines.itemconfig(tracking_value, text=str(SecToString(timelineSeconds)))
+    timelines.create_line(timelineMinx, yttLine, timelineMaxx, yttLine, fill="white")
+    timelines.create_line(timelineMinx, yttLine + timelineMark + 5, timelineMinx, yttLine - timelineMark - 5, fill="white")
+    timelines.create_line(timelineMaxx, yttLine + timelineMark + 5, timelineMaxx, yttLine - timelineMark - 5, fill="white")
 
-    # Make sure the line is on top.
-    timelines.tag_raise(tracking_line)
+    duration = YTTDuration()
+    starts = SectionStarts()
+    timelineLength = timelineMaxx - timelineMinx
+    
+    i = 0
+    for section in sectionList:
+        if section["json"] == currentJson:
+            jsonLength = jsonData[currentJson]["endTime"]
+            jsonxS = (section["start"]/jsonLength * timelineLength) + timelineMinx + 1
+            jsonxE = (section["end"]/jsonLength * timelineLength) + timelineMinx - 1
+            timelines.create_line(jsonxS, jsonLine + timelineMark, jsonxS, jsonLine - timelineMark, fill=section["color"], tags="sections")
+            timelines.create_line(jsonxE, jsonLine + timelineMark, jsonxE, jsonLine - timelineMark, fill=section["color"], tags="sections")
+            timelines.create_line(jsonxS, jsonLine - timelineMark, jsonxE, jsonLine - timelineMark, fill=section["color"], tags="sections")
 
+        yttxS = ((starts[i]/duration) * timelineLength) + timelineMinx + 1
+        yttxE = (((starts[i+1])/duration) * timelineLength) + timelineMinx - 1
+        timelines.create_line(yttxS, yttLine + timelineMark, yttxS, yttLine - timelineMark, fill=section["color"], tags="sections")
+        timelines.create_line(yttxE, yttLine + timelineMark, yttxE, yttLine - timelineMark, fill=section["color"], tags="sections")
+        timelines.create_line(yttxS, yttLine - timelineMark, yttxE, yttLine - timelineMark, fill=section["color"], tags="sections")
+        i += 1
+
+    # Keep the slider tracking lines on top!
+    timelines.tag_raise(chatlogPlayheadLine)
+    timelines.tag_raise(outputPlayheadLine)
+
+    UpdateTimelineTitles()
+    RefreshTimelinePlayheads()
+
+    # Update displayed time.
+    sectionTotalTime.configure(text=f"Total Time: {SecToString(YTTDuration())}")
+    return
+
+
+#--------------------------------------------------------------------------
+# Keyboard Input
+def KeyPress(event): #No switch statement cus I don't want to mess with python versions
+    global currentSection
+    if event.keysym == "Up":
+        if currentSection > 0:
+            SwapSections(currentSection, currentSection - 1)
+            currentSection = currentSection - 1
+            RedrawTimelines()
+    elif event.keysym == "Down":
+        if currentSection < len(sectionList) - 1:
+            SwapSections(currentSection, currentSection + 1)
+            currentSection = currentSection + 1
+            RedrawTimelines()
+    elif event.keysym == "Delete":
+        if isinstance(app.focus_get(), customtkinter.CTkEntry):
+            return  # Let the entry handle Delete normally
+        else:
+            DeleteSection(currentSection)
+app.bind("<KeyPress>", KeyPress)
+
+# Entry box keybinds:
+# Makes sure that typing in the section entry boxes
+# is reflected in the range slider.
+hourStart.bind("<KeyRelease>", UpdateSectionHandles)
+minStart.bind("<KeyRelease>", UpdateSectionHandles)
+secStart.bind("<KeyRelease>", UpdateSectionHandles)
+hourEnd.bind("<KeyRelease>", UpdateSectionHandles)
+minEnd.bind("<KeyRelease>", UpdateSectionHandles)
+secEnd.bind("<KeyRelease>", UpdateSectionHandles)
+
+#--------------------------------------------------------------------------
+# Cleanup
 # Manually delete the tempfiles... Not entirely sure if this is necessary.
 def cleanup():
     for file_path in tempDownloads:
@@ -775,7 +900,6 @@ def cleanup():
                 print(f"Could not remove {file_path}: {e}")
 
 atexit.register(cleanup)
-
 RedrawTimelines()
 
 #--------------------------------------------------------------------------
