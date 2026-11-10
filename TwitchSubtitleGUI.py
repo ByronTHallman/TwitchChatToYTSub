@@ -7,6 +7,7 @@ import tkinter
 import json
 import re #Used to identify chatter name colors from the json
 import tkinter.font as tkfont #Monospace font for the chatlog viewer.
+import bisect
 import random
 import threading # important for downloading
 from datetime import datetime, timedelta # importing time and date to get downloaded vod dates from first message.
@@ -40,11 +41,15 @@ app.focus_force()
 # Universal global variables
 jsonData = [] #List of dictionaries. "path", "name", "endTime"
 currentJson = -1 #The index of the current JSON in jsonData
-sectionList = [] #List of dictionaries. "json", "start", "end", "button", "ogIndex", "color", ""
+sectionList = [] #List of dictionaries. "json", "start", "end", "button", "ogIndex", "color", "darkerColor"
 currentSection = -1 #The index of the current section in sectionList
-colors = [ #Some hand-picked OKLCH colors
+brightColors = [ #Some hand-picked OKLCH colors
     "#973c5d", "#964601", "#4c6c01", "#04733a",
     "#007078", "#0164a3", "#5c52a3", "#824387"
+]
+yetDarkerColors =[
+  "#4d2634", "#5a4234", "#343d1f", "#234132",
+  "#224143", "#304a5b", "#474466", "#5e4c5f"
 ]
 lastColor = "#000000" #The last used color so we don't use it again
 
@@ -56,6 +61,11 @@ jsonLine = 90 # The y values of the current chatlog timeline.
 yttLine = 240 # The y values of the output timeline.
 chatlogPlayheadValue = 0 # Global variable storing first timeline playhead value for access.
 outputPlayheadValue = 0 #Global variable storing second timeline playhead value for access.
+rangeSliderValues = (0, 0) #Global variable for storing last known min and max for the section creation range slider.
+
+# Chat viewer global variables
+viewerMessageTimes = [] # Stored message time values for chat viewer interaction with sliders
+settingsSmallCaps = False # Global check for if the "Small Caps" font is being used
 
 # Tempfile global variables
 tempDownloads = [] #Any file downloaded by URL will be added to this list to be removed on shutdown
@@ -105,7 +115,7 @@ def ImportJSON():
     # Warn the user if the chatlog is devoid of comments, but let them use it if they want to for some ungodly reason.
     if json_metadata.get('comments') == []:
         json_label += "\nWARNING: EMPTY"
-        app.after(0, messagebox.showwarning("Import Warning", f"No messages found for this file."))
+        app.after(0, lambda: messagebox.showwarning("Import Warning", f"No messages found for this file."))
 
     # If some data is missing, fallback to filename.
     if(not (json_metadata['streamer'] or json_metadata['game'] or json_metadata['date'])):
@@ -188,6 +198,10 @@ def ImportURL():
             formatted_comments = [CommentFormatter(first_message)]
             for vod_message in vod_chat:
                 formatted_comments.append(CommentFormatter(vod_message))
+
+            # For some reason, some VODs have messages further along than metadata suggests.
+            # Fall forward to last comment timecode if so.
+            vod_duration = DoubleCheckDuration(formatted_comments, vod_duration)
 
             # Dump formatted comments into downloaded temp file.
             with open(vod_tempfile, "w", encoding="utf-8") as f:
@@ -279,6 +293,9 @@ def ParseComment(comment):
         color = DEFAULT_COLOR
     return (seconds, str(name), str(body).replace("\n", " "), color)
 
+#--------------------------------------------------------------------------
+# Visualizer
+
 #Returns a sorted list of (seconds, name, body, name color) for one imported chatlog.
 def LoadMessages(index):
     entry = jsonData[index]
@@ -312,7 +329,8 @@ def LoadMessages(index):
 def BuildViewerRows(messages, sections, selected, editedOnlyMode):
     rows = []
     firstRow = {}
-    for t, name, body, color in messages:
+    times = [] # let's not throw time away
+    for t, name, body, darkerColor in messages:
         #Collect every section that contains this message.
         matchingSections = []
         for position, section in sections:
@@ -332,8 +350,9 @@ def BuildViewerRows(messages, sections, selected, editedOnlyMode):
             if editedOnlyMode:
                 continue
             tag = "out"
-        rows.append((SecToString(int(t)), name, color, body, tag))
-    return rows, firstRow
+        rows.append((SecToString(int(t)), name, darkerColor, body, tag))
+        times.append(float(t)) # keep the time values to inform the highlighted message mechanic
+    return rows, firstRow, times # !!! catch time values to put into viewerMessageTimes
 
 #Turns rows into the text to insert and the character ranges to tag.
 #Returns (text, ranges, stampWidth). ranges maps tag -> list of (line, startColumn, endColumn), lines start at 1.
@@ -356,7 +375,7 @@ def BuildViewerText(rows):
     for n, (stamp, name, color, body, tag) in enumerate(rows, start=1):
         head = stamp.ljust(stampWidth) + "  "
         label = name + ":"
-        line = head + label + " " + body
+        line = SmallCapsPass(head + label + " " + body) #in case the Small Caps font is used, reformat the preview text accordingly
         nameStart = len(head)
         nameEnd = nameStart + len(label)
         lines.append(line)
@@ -371,7 +390,7 @@ def BuildViewerText(rows):
 #Redraws the viewer from viewerJson / viewerSection / editedOnly.
 #scroll=True jumps to the selected section. keep=True stays at the current scroll position.
 def RenderViewer(scroll=False, keep=False):
-    global viewerSection
+    global viewerSection, viewerMessageTimes # need to catch the times for highlighted comment mechanic
     if viewerJson < 0 or viewerJson >= len(jsonData):
         return
     if not (0 <= viewerSection < len(sectionList) and sectionList[viewerSection]["json"] == viewerJson):
@@ -381,19 +400,19 @@ def RenderViewer(scroll=False, keep=False):
     for position, section in enumerate(sectionList):
         if section["json"] == viewerJson:
             sections.append((position, section))
-    rows, firstRow = BuildViewerRows(LoadMessages(viewerJson), sections, viewerSection, editedOnly)
+    rows, firstRow, viewerMessageTimes = BuildViewerRows(LoadMessages(viewerJson), sections, viewerSection, editedOnly)
     if not rows:
-        rows = [("", "", DEFAULT_COLOR, "No edited text in this chatlog yet." if editedOnly else "This chatlog has no messages.", "out")]
+        rows = [("", "", DEFAULT_COLOR, "No sections in this chatlog yet." if editedOnly else "This chatlog has no messages.", "out")]
     text, ranges, stampWidth = BuildViewerText(rows)
     previous = viewer.yview()[0]
 
     viewer.configure(state="normal")
     viewer.delete("1.0", "end")
-    viewer.tag_config("ts", foreground="#6fa8dc")
+    viewer.tag_config("ts", foreground="#6fa8dc", font=viewerTimeFont)
     viewer.tag_config("out", foreground="#8a8a8a")
     viewer.tag_config("hang", lmargin2=viewerFont.measure("0") * (stampWidth + 2)) #wrapped lines line up under the message
     for position, section in sections:
-        viewer.tag_config("sec" + str(position), background=section["color"], foreground="#ffffff")
+        viewer.tag_config("sec" + str(position), background=section["darkerColor"], foreground="#ffffff")
     viewer.insert("1.0", text)
     viewer.tag_add("hang", "1.0", "end")
     for tag, spans in ranges.items():
@@ -410,18 +429,18 @@ def RenderViewer(scroll=False, keep=False):
         for i in range(0, len(indexes), 2000): #tag many ranges per call, much faster than one by one
             viewer.tag_add(tag, *indexes[i:i + 2000])
     viewer.tag_raise("ts")
+
+    viewer.tag_config("active_highlight", background="#0a0a0a") # Or any color you prefer
+    for tag in ranges:
+        if tag.startswith("nm"):
+            viewer.tag_raise(tag) # Ensure name colors still pop over the background
+            viewer.tag_raise("active_highlight")
+
     viewer.configure(state="disabled")
 
     viewer.yview_moveto(previous if keep else 0)
     if scroll and viewerSection in firstRow:
         viewer.yview(f"{firstRow[viewerSection] + 1}.0") #put the section's first message at the top
-
-def ToggleEditedOnly():
-    global editedOnly
-    editedOnly = not editedOnly
-    editedOnlyButton.configure(text="Show full chatlog" if editedOnly else "Show only edited text")
-    RenderViewer(scroll=True)
-
 
 #Change 11/8/26: SelectJson now also tells the viewer which chatlog to show.
 def SelectJson(index):
@@ -437,6 +456,9 @@ def SelectJson(index):
     endTime = jsonData[currentJson]["endTime"]
     createSectionRangeSlider.configure(to=endTime)
     createSectionRangeSlider.set((0, endTime)) # Reset knobs to start and end
+
+    # Update timeline playheads to match current state
+    RefreshTimelinePlayheads()
     
     # Force text boxes to match the new reset slider
     SectionSliderDragged([0, endTime])
@@ -466,14 +488,15 @@ def CreateSection():
     if(end == 0):
         return
 
-    color = GenerateColor()
+    colorID = GenerateColor()
+    createSectionButton.configure(fg_color = brightColors[colorID])
     sectionButton = customtkinter.CTkButton(
         master=sectionEditor,
         text=str(len(sectionList)) + " - " + jsonData[currentJson]["name"] + "\n" + SecToString(start) + " - " + SecToString(end),
         command=lambda index=len(sectionList): SelectSection(index)
     )
-    sectionButton.configure(fg_color = color, hover = False)
-    sectionList.append({"json":currentJson, "start":start, "end":end, "button":sectionButton, "ogIndex":len(sectionList), "color":color, "jsonIndex":currentJson})
+    sectionButton.configure(fg_color = brightColors[colorID], hover = False)
+    sectionList.append({"json":currentJson, "start":start, "end":end, "button":sectionButton, "ogIndex":len(sectionList), "color":brightColors[colorID], "darkerColor":yetDarkerColors[colorID], "jsonIndex":currentJson})
     sectionButton.grid(row=len(sectionList), column=0, padx=5, pady=5, sticky="nsew")
     SelectSection(len(sectionList))
     RedrawTimelines()
@@ -510,11 +533,11 @@ def DeleteSection(index):
 # Ensures section colors aren't repeated in sequence.
 def GenerateColor():
     global lastColor
-    color = random.choice(colors)
-    while color == lastColor:
-        color = random.choice(colors)
-    lastColor = color
-    return color
+    colorID = random.randint(0, 7)
+    while brightColors[colorID] == lastColor:
+        colorID = random.randint(0, 7)
+    lastColor = brightColors[colorID]
+    return colorID
 
 # Checks whether the section timestamps make sense, and updates the end accordingly.
 # Seems to be a less friction-inducing implementation.
@@ -585,6 +608,17 @@ def CreateLabel(metadata, vod_chat):
             return f"Invalid Chatlog"
     else:
         return f"{metadata['streamer']}, {metadata['date']}\nGame: {metadata['game']}"
+
+# Some VODs have a strange quirk where 
+# messages go further than VOD metadata suggests.
+# Fall back to last message as max length if so.
+def DoubleCheckDuration(comments, duration):
+    if not comments:
+        return duration
+    elif(comments[-1].get('content_offset_seconds') > duration):
+        return comments[-1].get('content_offset_seconds')
+    else:
+        return duration
 
 #--------------------------------------------------------------------------
 # Global timing info helper functions
@@ -681,8 +715,13 @@ def ImportMetadataJSON(imported_data, json_comments = []):
     json_game = json_chapter_data[0].get('gameDisplayName') if json_chapter_data and len(json_chapter_data) > 0 else 'Unknown'
     json_date = f"{month}/{day}/{year[-2:]}" if json_date_data != None else 'Unknown Date'
     json_lastmsg = json_comments[-1] if json_comments else None
-    json_lastsec = json_lastmsg.get("content_offset_seconds", json_lastmsg.get("time_in_seconds", 0))
+    json_lastsec = json_lastmsg.get("content_offset_seconds", json_lastmsg.get("time_in_seconds", 0)) if json_comments else 0
     json_duration = json_video_data.get('end', 0) if json_video_data else json_lastsec
+
+    # There are some strange cases where 
+    # chat message timestamps extend beyond metadata stream length.
+    if(json_lastsec > json_duration):
+        json_duration = json_lastsec
 
     # Return as metadata dictionary, along with "comments" to be parsed for time.
     return{
@@ -729,7 +768,6 @@ def ExportYTT():
         )
         return
 
-
     # Assemble the data for the backend in the exact order of sectionList
     ordered_sections = []
     for section in sectionList:
@@ -752,7 +790,11 @@ def ExportYTT():
 #--------------------------------------------------------------------------
 # Section editor slider functions
 
+# Initiates changes to the entry boxes
+# depending on range slider positions
 def SectionSliderDragged(values):
+    global rangeSliderValues
+
     sliderMin, sliderMax = values
 
     if currentJson == -1 or sliderMax == 0:
@@ -770,6 +812,20 @@ def SectionSliderDragged(values):
     UpdateBoxes(hourStart, minStart, secStart, sliderMin) #update starts
     UpdateBoxes(hourEnd, minEnd, secEnd, sliderMax) #update ends
 
+    if sliderMin != rangeSliderValues[0]:
+        # The left (start) handle moved
+        if viewerMessageTimes:
+            ScrollViewer(int(sliderMin))
+            
+    elif sliderMax != rangeSliderValues[1]:
+        # The right (end) handle moved
+        if viewerMessageTimes:
+            ScrollViewer(int(sliderMax))
+
+    rangeSliderValues = (sliderMin, sliderMax)
+    
+# Makes sure that updates to the entry boxes
+# update the positions of the sectioner range handles
 def UpdateSectionHandles(event=None):
     # Leave if there is no selected JSON.
     if currentJson == -1:
@@ -816,7 +872,7 @@ def UpdateTimelineTitles():
     timelines.itemconfig(chatlogTimelineTitle, text=str(f"Current Chatlog: {chatlogPlayheadValue}"))
     timelines.itemconfig(outputTimelineTitle, text=str(f"Output File: {outputPlayheadValue}"))  
 
-# Quickly update both timeline playhead lines and number values.
+# Update both timeline playhead lines and number values.
 def RefreshTimelinePlayheads():
     UpdateTimelinePlayhead(chatlogSlider, chatlogPlayheadLine, jsonLine, chatlogPlayheadText, 
                            (jsonData[currentJson].get('endTime', 0) if currentJson != -1 else 0))
@@ -830,7 +886,7 @@ def UpdateTimelinePlayhead(slider, tracking_line, base_y, tracking_value, second
     sliderRange = slider.cget("to") - slider.cget("from_")
     if sliderRange <= 0:
         # No slider? No service. I honestly don't know why I am checking for this.
-        # It's to prevent division by zero, but I don't think we'll ever get to this point.
+        # It's to prevent division by zero, but I don't think we'll ever get to this point?
         return
 
     # Calculate current slider value, turn into seconds.
@@ -849,43 +905,149 @@ def UpdateTimelinePlayhead(slider, tracking_line, base_y, tracking_value, second
 
     if slider is chatlogSlider:
         chatlogPlayheadValue = timelineSeconds
+
+        # if messages exist, scroll the chat viewer
+        if viewerMessageTimes:
+            ScrollViewer(timelineSeconds)
+
     elif slider is outputSlider:
         outputPlayheadValue = timelineSeconds
 
     # Make sure the line is on top.
     timelines.tag_raise(tracking_line)
 
+# Helper function for UpdateTimePlayhead, SectionSliderDragged
+# directly controls the position of the chat viewer object
+def ScrollViewer(timelineSeconds):
+    # Find the closest message index
+    target_index = bisect.bisect_left(viewerMessageTimes, timelineSeconds)
+
+    # Remove highlight from last highlighted message.
+    viewer.tag_remove("active_highlight", "1.0", "end")
+    
+    # Cap to last possible chat message in visualizer
+    if target_index >= len(viewerMessageTimes):
+        viewer.yview("end")
+    else:
+        # Create line index usable by viewer
+        line_index = f"{target_index + 1}.0"
+
+        # Jump to the found message
+        viewer.yview(line_index)
+
+        # Keep track of how close to the end the message is
+        timeLeft = len(viewerMessageTimes) - float(line_index)
+
+        # If not near the end, shift the viewer's offset to center the found message more
+        if(timeLeft) > 7:
+            viewer.yview_scroll(-7, "units")
+        else:
+            viewer.yview_scroll(-(timeLeft), "units")
+
+        # Highlight the found message
+        viewer.tag_add("active_highlight", line_index, f"{line_index} lineend")
+
+#--------------------------------------------------------------------------
+# Settings-related helper functions
+
+# For choosing chat viewer modes
+def ViewerModeSelect(value):
+    global editedOnly
+    if value == "Full Chatlog":
+        editedOnly = False
+    elif value == "Chatlog's Sections":
+        editedOnly = True
+    elif value == "Output":
+        #TODO
+        print("Output display not done yet")
+    RenderViewer(keep=True)
+        
+# Render the current chat row into "small caps" format
+# using funny unicode characters
+# can't really be covered by simple font changes
+def SmallCapsPass(text):
+    if settingsSmallCaps:
+        lowercase = "abcdefghijklmnopqrstuvwxyz"
+        small_caps = "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ" 
+        caps_map = str.maketrans(lowercase, small_caps)
+        return text.translate(caps_map)
+    else:
+        return text
+
+# Goes to the viewer object and changes its font
+# based on what is chosen in settings
+def UpdateViewerFont(font):
+    global settingsSmallCaps
+
+    if fontPreview.get() == 0:
+        return
+
+    if(font == "Small Caps"):
+        viewerFont.configure(family="Arial")
+        settingsSmallCaps = True
+    else:
+        settingsSmallCaps = False
+
+    if(font == "Sans-serif"):
+        viewerFont.configure(family="Roboto")
+    elif(font == "Serif"):
+        viewerFont.configure(family="Times New Roman")
+    elif(font == "Monospace"):
+        viewerFont.configure(family="Lucida Console")
+    elif(font == "Casual"):
+        viewerFont.configure(family="Comic Sans MS")
+    elif(font == "Cursive"):
+        viewerFont.configure(family="Monotype Corsiva")
+
+    # Rebuild the viewer when this happens
+    RenderViewer()
+
+# Every time you touch the "preview fonts" toggle
+# it needs to initiate a few things
+# such as resetting the font to Courier New,
+# or switching to the just-selected font
+def FontReset():
+    global settingsSmallCaps
+    # If set OFF, then reset visualizer to default font.
+    if fontPreview.get() == 0:
+        viewerFont.configure(family="Courier New")
+        settingsSmallCaps = False
+        RenderViewer()
+    else:
+        UpdateViewerFont(fontOption.get())
+
 #--------------------------------------------------------------------------
 #----------------------------- INITIALIZE UI ------------------------------
 #--------------------------------------------------------------------------
 #Defining general App sections. leftSide, sectionEditor
-app.grid_rowconfigure(0, weight=1)
+app.grid_rowconfigure(0, weight=0)
 app.grid_rowconfigure(1, weight=1)
-app.grid_columnconfigure(0, weight=1, uniform="side")
-app.grid_columnconfigure(1, weight=2)
-app.grid_columnconfigure(2, weight=1, uniform="side")
-leftSide = customtkinter.CTkFrame(master=app)
-leftSide.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+app.grid_columnconfigure(1, weight=1)
+
+leftSide = customtkinter.CTkFrame(master=app, width=200)
+leftSide.grid(row=0, column=0, rowspan=2, padx=10, pady=10, sticky="nsew")
+leftSide.grid_propagate(False)
 
 sectionAdder = customtkinter.CTkFrame(master=app)
 sectionAdder.grid(row=0, column=1, padx=10, pady=10, sticky="new")
 
-rightSide = customtkinter.CTkFrame(master=app)
-rightSide.grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
+rightSide = customtkinter.CTkFrame(master=app, width=275)
+rightSide.grid(row=0, column=2, rowspan=2, padx=10, pady=10, sticky="nsew")
+rightSide.grid_propagate(False)
 
 #--------------------------------------------------------------------------
 # leftSide. Importing and JSON visualizer.
-leftSide = customtkinter.CTkFrame(master=app)
-leftSide.grid(row=0, column=0, rowspan=2, padx=10, pady=10, sticky="nsew")
+# leftSide = customtkinter.CTkFrame(master=app)
+# leftSide.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
 leftSide.grid_columnconfigure(0, weight=1)
 leftSide.grid_rowconfigure(2, weight=1)
 
 # importJSON. Prompts user to import JSON files.
-importJSON = customtkinter.CTkButton(master=leftSide, text="Import by File", command=ImportJSON)
+importJSON = customtkinter.CTkButton(master=leftSide, text="Import by File", font = ("Roboto", 13), command=ImportJSON)
 importJSON.grid(row=0, column=0, padx=5, pady=5, sticky="new")
 
 # importURL. Prompts user to enter a URL to download directly from a Twitch VOD link.
-importURL = customtkinter.CTkButton(master=leftSide, text="Import by URL", command=ImportURL, fg_color="#7a2b2b", hover_color="#5c1e1e")
+importURL = customtkinter.CTkButton(master=leftSide, text="Import by URL", font = ("Roboto", 13), command=ImportURL, fg_color="#7a2b2b", hover_color="#5c1e1e")
 importURL.grid(row=1, column=0, padx=5, pady=5, sticky="new")
 
 # Contains list of all the chatlogs.
@@ -895,22 +1057,26 @@ jsonVisualizer.grid_rowconfigure(1, weight=1)
 jsonVisualizerTitle = customtkinter.CTkLabel(master = jsonVisualizer, text="Imported Chatlogs")
 jsonVisualizerTitle.grid(row=0, column=0, padx=1, pady=(1, 10), sticky="ew")
 jsonVisualizerTitle.configure(font = ("Roboto", 15))
-jsonVisualizer.grid(row=2, column=0, padx=5, pady=5, sticky="nsew")
+jsonVisualizer.grid(row=2, column=0, rowspan=2, padx=5, pady=5, sticky="nsew")
 
 #--------------------------------------------------------------------------
 #rightSide. Export and section editor.
-rightSide = customtkinter.CTkFrame(master=app)
-rightSide.grid(row=0, column=2, rowspan=2, padx=10, pady=10, sticky="nsew")
+#rightSide = customtkinter.CTkFrame(master=app)
+#rightSide.grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
 rightSide.grid_columnconfigure(0, weight=1)
-rightSide.grid_rowconfigure(1, weight=1)
+rightSide.grid_rowconfigure(3, weight=1)
 
 #exportButton. Sends the ordered list of JSONs to the YTT subtitles converter.
-exportButton = customtkinter.CTkButton(master=rightSide, text="Export to YTT", command=ExportYTT, fg_color="#2b7a3d", hover_color="#1e5c2d")
-exportButton.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+exportButton = customtkinter.CTkButton(master=rightSide, text="Export to YTT", font = ("Roboto", 13), command=ExportYTT, fg_color="#2b7a3d", hover_color="#1e5c2d")
+exportButton.grid(row=0, column=0, padx=5, pady=5, sticky="new")
+
+#exportButton. Sends the ordered list of JSONs to the YTT subtitles converter.
+settingsButton = customtkinter.CTkButton(master=rightSide, text="Settings", font = ("Roboto", 14), fg_color="#7a5e2b", hover_color="#5c481e")
+settingsButton.grid(row=1, column=0, padx=5, pady=5, sticky="new")
 
 #sectionEditor. Where the user reorganizes the order of JSON sections.
 sectionEditor = customtkinter.CTkScrollableFrame(master=rightSide)
-sectionEditor.grid(row=1, column=0, padx=10, pady=10, sticky="nsew")
+sectionEditor.grid(row=2, column=0, rowspan=1, padx=10, pady=10, sticky="nsew")
 
 sectionEditor.grid_columnconfigure(0, weight=1)
 sectionEditor.grid_rowconfigure(1, weight=1)
@@ -926,29 +1092,33 @@ sectionTotalTime.grid(row=1, column=0, padx=0, pady=0, sticky="ew")
 #----------------------------------------------------------------------------------------------
 #subtitle settings
 output = customtkinter.CTkFrame(master=rightSide)
-output.grid(row=2, column=0, padx=10, pady=(0, 10), sticky="ew")
+output.grid(row=5, column=0, padx=10, pady=(0, 10), sticky="ew")
 output.grid_columnconfigure(1, weight=1)
 
 title = customtkinter.CTkLabel(master=output, text="Subtitle Settings", font=("Roboto", 13))
-title.grid(row=0, column=0, columnspan=2, pady=(4, 2))
+title.grid(row=0, column=0, columnspan=2, padx=15, pady=(4, 2), sticky="w")
 
 #font and size options
-customtkinter.CTkLabel(master=output, text="Font:").grid(row=1, column=0, padx=(8, 4), pady=2, sticky="w")
-fontOption = customtkinter.CTkOptionMenu(master=output, values=["Sans-serif", "Serif", "Monospace", "Casual", "Cursive", "Small Caps"], height=24)
-fontOption.grid(row=1, column=1, padx=(0, 8), pady=2, sticky="ew")
+fontPreview = customtkinter.CTkSwitch(master=output, text="Preview Font", command=FontReset)
+fontPreview.grid(row=0, column=1, padx=20, pady=2, sticky="e")
 
-customtkinter.CTkLabel(master=output, text="Size:").grid(row=2, column=0, padx=(8, 4), pady=2, sticky="w")
+customtkinter.CTkLabel(master=output, text="Font:").grid(row=1, column=0, padx=(8, 4), pady=2, sticky="e")
+fontOption = customtkinter.CTkOptionMenu(master=output, values=["Sans-serif", "Serif", "Monospace", "Casual", "Cursive", "Small Caps"], height=24, command=UpdateViewerFont)
+fontOption.grid(row=1, column=1, padx=(0, 8), pady=2, sticky="ew")
+fontOption.set("Sans-serif")
+
+customtkinter.CTkLabel(master=output, text="Size:").grid(row=2, column=0, padx=(8, 4), pady=2, sticky="e")
 fontSize = customtkinter.CTkEntry(master=output, placeholder_text="10", height=24)
 fontSize.insert(0, "10")
 fontSize.grid(row=2, column=1, padx=(0, 8), pady=2, sticky="ew")
 
 #duration and opacity options
-customtkinter.CTkLabel(master=output, text="Opacity:").grid(row=3, column=0, padx=(8, 4), pady=2, sticky="w")
+customtkinter.CTkLabel(master=output, text="Opacity:").grid(row=3, column=0, padx=(8, 4), pady=2, sticky="e")
 opacityOptions = customtkinter.CTkSlider(master=output, from_=0, to=100, number_of_steps=100, height=14)
 opacityOptions.set(100)
 opacityOptions.grid(row=3, column=1, padx=(0, 8), pady=2, sticky="ew")
 
-customtkinter.CTkLabel(master=output, text="Secs:").grid(row=4, column=0, padx=(8, 4), pady=(2, 6), sticky="w")
+customtkinter.CTkLabel(master=output, text="Wait:").grid(row=4, column=0, padx=(8, 4), pady=(2, 6), sticky="e")
 durationOptions = customtkinter.CTkEntry(master=output, placeholder_text="10", height=24)
 durationOptions.insert(0, "10")
 durationOptions.grid(row=4, column=1, padx=(0, 8), pady=(2, 6), sticky="ew")
@@ -959,7 +1129,7 @@ sectionAdder.grid_columnconfigure(0, weight=1)
 sectionAdder.grid_rowconfigure(4, weight=1)
 
 sectionAdderTitle = customtkinter.CTkLabel(master = sectionAdder, text="Create Subtitle Section")
-sectionAdderTitle.grid(row=0, column=0, padx=1, pady=(5, 0), sticky="ew")
+sectionAdderTitle.grid(row=0, column=0, padx=0, pady=(5, 0), sticky="nsew")
 sectionAdderTitle.configure(font = ("Roboto", 15))
 
 currentChatlogText = customtkinter.CTkLabel(master = sectionAdder, text="No Chatlog Selected")
@@ -1001,7 +1171,7 @@ secEnd = customtkinter.CTkEntry(timeEntry, placeholder_text="s")
 secEnd.grid(row=0, column=10, padx=(0, 5), pady=5, sticky="n")
 secEnd.configure(width=30, justify="center")
 
-createSectionRangeSlider = CTkRangeSlider(master=sectionAdder, from_=0, to=100, width=600, command=SectionSliderDragged)
+createSectionRangeSlider = CTkRangeSlider(master=sectionAdder, from_=0, to=100, width=900, command=SectionSliderDragged)
 createSectionRangeSlider.grid(row=3, column=0, padx=5, pady=2, sticky="ew")
 
 createSectionButton = customtkinter.CTkButton(master=sectionAdder, text="Create Section", command=CreateSection)
@@ -1014,15 +1184,23 @@ viewerFrame.grid(row=1, column=1, padx=10, pady=(0, 10), sticky="nsew")
 viewerFrame.grid_columnconfigure(0, weight=1)
 viewerFrame.grid_rowconfigure(1, weight=1)
 
-editedOnlyButton = customtkinter.CTkButton(master=viewerFrame, text="Show only edited text", command=ToggleEditedOnly)
-editedOnlyButton.grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+viewerFrame.grid_propagate(False)
+viewerFrame.grid_columnconfigure(0, weight=1)
+viewerFrame.grid_rowconfigure(1, weight=1)
 
+#editedOnlyButton = customtkinter.CTkButton(master=viewerFrame, text="Show only sections", command=ToggleEditedOnly)
+#editedOnlyButton.grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+
+viewerModeButtons = customtkinter.CTkSegmentedButton(master=viewerFrame, values=["Full Chatlog", "Chatlog's Sections", "Mystery Button"], command=ViewerModeSelect)
+viewerModeButtons.grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+viewerTimeFont = tkfont.Font(family="Courier New", size=11) #Monospace so the timestamp column lines up
 viewerFont = tkfont.Font(family="Courier New", size=11) #Monospace so the timestamp column lines up
 
 #The text box is created first, so the scrollbar can be connected to it directly.
 viewer = tkinter.Text(
     viewerFrame,
-    height=8,
+    height=1,
+    width=1,
     wrap="word",
     font=viewerFont,
     bg="#202020",
@@ -1038,7 +1216,6 @@ viewer.grid(row=1, column=0, padx=(5, 0), pady=(0, 5), sticky="nsew")
 viewerScrollbar = customtkinter.CTkScrollbar(master=viewerFrame, orientation="vertical", command=viewer.yview)
 viewerScrollbar.grid(row=1, column=1, padx=(0, 5), pady=(0, 5), sticky="ns")
 viewer.configure(yscrollcommand=viewerScrollbar.set)
-
 
 #--------------------------------------------------------------------------
 #Timelines. Where the currently selected JSON's timeline is displayed, and where the total YTT section view is displayed.
