@@ -151,7 +151,6 @@ def importFileJSON(importEmpty):
         json_label = Path(filePath).stem
 
     # Attach this JSON to the chain of chatlog information.
-
     jsonData.append({"path":filePath, "name":json_label, "endTime":duration, "button": jsonCard})
     if len(jsonData) >= 2:
         #print(len(jsonData) - 1)
@@ -161,7 +160,6 @@ def importFileJSON(importEmpty):
         # "jsonData" as a list of dicts, containing: 
         # filepath, vod label, length, comments 
         # "comments" as list of dicts, containing commenter, messages, and content_offset_seconds
-
     if not importEmpty:
         jsonCard.configure(
             text=str(len(jsonData)-1)
@@ -185,6 +183,7 @@ def importFileJSON(importEmpty):
             command=lambda index=len(jsonData) - 1: jsonSelect(index)
         )
 
+
     # Refresh viewer contents 
     if lastChatlogMode == "Full Sections Output":
         viewerRenderOutput(scrollTo="keep")
@@ -197,6 +196,7 @@ def importFileJSON(importEmpty):
     # And should be, by definition, blank.
     tracksRedraw()
     outputUseCache = False
+
     # viewerBuildOutput()
     viewerRenderAgnostic()
     # print(f"ok json current is {currentJson}")
@@ -204,7 +204,6 @@ def importEmptyJSON():
     importFileJSON(True)
 def importJSON():
     importFileJSON(False)
-
 
 
 
@@ -2076,9 +2075,9 @@ def viewerRenderAgnostic(keep=False, scroll=True, scrollTo="top"):
         #print(f"tracksRedraw scroll = {scroll}")
         viewerRenderSource(keep=keep, scroll=scroll)  #Refresh the viewer whenever sections are created, deleted or reordered.
 
-
 #Things to do when the app starts
 importEmptyJSON()
+
 
 #--------------------------------------------------------------------------
 # Keyboard Input
