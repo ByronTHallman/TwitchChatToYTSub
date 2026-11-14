@@ -39,19 +39,17 @@ app.title("I Played Tony Hawk's Ride Once and It Sucked")
 app.focus_force()
 
 # Colors
-brightColors = [ #Some hand-picked OKLCH colors
+brightColors = [ # Some hand-picked OKLCH colors
     "#973c5d", "#964601", "#4c6c01", "#04733a",
-    "#007078", "#0164a3", "#5c52a3", "#824387"
-]
-yetDarkerColors =[
+    "#007078", "#0164a3", "#5c52a3", "#824387"]
+yetDarkerColors = [ # Hand-picked darker, desaturated equivalents for visualizer.
   "#4d2634", "#5a4234", "#343d1f", "#234132",
-  "#224143", "#304a5b", "#474466", "#5e4c5f"
-]
-lastColor = "#000000" #The last used color so we don't use it again
-TwitchUserColors = (
+  "#224143", "#304a5b", "#474466", "#5e4c5f"]
+TwitchUserColors = ( # Random colors directly from Twitch for unassigned name colors
     "#0000FF", "#8A2BE2", "#5F9EA0", "#D2691E", "#FF7F50",
     "#1E90FF", "#B22222", "#DAA520", "#008000", "#FF69B4",
     "#FF4500", "#FF0000", "#2E8B57", "#00FF7F", "#9ACD32",)
+lastColors = ["#000000", "#000000", "#000000", "#000000"] # Ensures that the last 4 colors aren't repeats
 
 # Source management global variables
 jsonData = []      # List of dictionaries for full chatlogs. "path", "name", "endTime"
@@ -79,12 +77,14 @@ viewerTimes = []                 # Stored message time values for chat viewer in
 settingsSmallCaps = False           # Global check for if the "Small Caps" font is being used
 lastChatlogMode = "Source Preview"  # Keeps track of the last used chatlog viewer mode
 
-# Output global variables for viewer's output mode
+# Output global variables to store viewer's output mode data
 outputTimes = []     # Stores all OUTPUT message times, used for bisect searching section endpoints
 outputText = ""      # Pre-rendered text string
 outputRanges = {}    # Pre-computed tag ranges
 outputStampWidth = 0 # Pre-calculated timestamp column width
 outputFirstRows = {}  # Tracks section starting times
+outputUseCache = False
+outputJumppoint = "playhead"
 
 # Tempfile global variables
 tempDownloads = [] #Any file downloaded by URL will be added to this list to be removed on shutdown
@@ -143,7 +143,7 @@ def importFileJSON():
         json_label = Path(filePath).stem
 
     # Attach this JSON to the chain of chatlog information.
-    jsonData.append({"path":filePath, "name":json_label, "endTime":duration})
+    jsonData.append({"path":filePath, "name":json_label, "endTime":duration, "button": jsonCard})
     if len(jsonData) >= 1:
         #print(len(jsonData) - 1)
         jsonSelect(len(jsonData) - 1)
@@ -153,12 +153,12 @@ def importFileJSON():
         # filepath, vod label, length, comments 
         # "comments" as list of dicts, containing commenter, messages, and content_offset_seconds
     jsonCard.configure(
-        text=str(len(jsonData)-1) 
+        text=str(len(jsonData)) 
         + " - " + jsonData[-1]["name"] 
         + "\nDuration: "
         + "(" 
         + str(timedelta(seconds=duration)) + ")",
-        state="normal",
+        state="normal", anchor="w",
         fg_color="#1f538d", hover_color="#14375e",
         command=lambda index=len(jsonData) - 1: jsonSelect(index)
     )
@@ -174,7 +174,8 @@ def importFileJSON():
     # Redraw the timelines because new "current chatlog" is now different
     # And should be, by definition, blank.
     tracksRedraw()
-    viewerBuildOutput()
+    outputUseCache = False
+    #viewerBuildOutput()
     viewerRenderAgnostic()
     #print(f"ok json current is {currentJson}")
 
@@ -294,13 +295,13 @@ def importDownloadURL():
             # filepath, vod label, length, comments 
             # "comments" as list of dicts, containing commenter, messages, and content_offset_seconds 
         def update_ui():
-            jsonData.append({"path": vod_tempfile, "name": vod_label, "endTime": vod_duration, "comments": downloaded_comments})
+            jsonData.append({"path": vod_tempfile, "name": vod_label, "endTime": vod_duration, "comments": downloaded_comments, "button": urlCard})
             if len(jsonData) >= 1:
                 jsonSelect(len(jsonData) - 1)
 
             # Update the "downloading" label to reflect the VOD's information
             urlCard.configure(
-                text=str(len(jsonData)-1) 
+                text=str(len(jsonData)) 
                 + " - " + jsonData[-1]["name"] 
                 + "\nDuration: " 
                 + "(" 
@@ -324,7 +325,8 @@ def importDownloadURL():
     # Redraw the timelines because new "current chatlog" is now different
     # And should be, by definition, blank.
     tracksRedraw()
-    viewerBuildOutput()
+    outputUseCache = False
+    #viewerBuildOutput()
     viewerRenderAgnostic()
 
     # Entire program froze during download 
@@ -465,11 +467,17 @@ def viewerBuildText(rows):
     for row, (stamp, name, color, body, tag) in enumerate(rows, start=1): # iterate across rows, start at 1
         head = stamp.ljust(stampWidth) + "  "
         label = name + ":"
-        line = viewerSmallCapsPass(head + label + " " + body) #in case the Small Caps font is used, reformat the preview text accordingly
+        content = label + " " + body
+        is_header = name.startswith("=====")
+        if not is_header:
+            content = viewerSmallCapsPass(content)
+        line = head + content #in case the Small Caps font is used, reformat the preview text accordingly
         nameStart = len(head)
         nameEnd = nameStart + len(label)
         lines.append(line)
         AddRange("timestamp", row, 0, stampWidth)
+        if is_header:
+            AddRange("header", row, nameStart, len(line))
         AddRange("name" + color[1:], row, nameStart, nameEnd) #one tag per name color, like nm1E90FF
         if tag == "out":
             AddRange(tag, row, nameEnd, len(line)) #only the message text is gray
@@ -478,6 +486,41 @@ def viewerBuildText(rows):
 
     # Concatenate every line with \n, return as (all rows, ranges, widths)
     return "\n".join(lines), ranges, stampWidth
+
+def viewerRender(keep=False, scroll=False, scrollTo="top", mode="source"):
+    # Tag meanings:
+    # "secN" = message section of section N
+    # "headerN" = section header row for section N
+    # "timestamp" = self explanatory
+    # "out" = message is not in a section
+    # "hang" = a message is indented, remainder pushed onto additional lines
+    # "nm123456" = color tags, where 123456 are hex code values
+    # "active_highlight" = message is scrolled onto and highlighted
+
+    # == GLOBALS ==
+    global viewerSection, viewerTimes, outputPlayheadValue
+    mode = viewerModeButtons.get()
+
+    # Store preview view position. Unsure if this is ever used.
+    previous = viewer.yview()[0]
+
+    # Temporary
+    if keep:
+        scrollTo = "keep"
+    if scroll:
+        scrollTo = "section"
+
+    if mode == "Full Sections Output":
+        viewerBuildOutput()  # Does nothing if outputUseCache is True
+        text = outputText
+        ranges = outputRanges
+        stampWidth = outputStampWidth
+        firstRow = outputFirstRows
+        viewerTimes = outputTimes
+    else:  
+        if currentJson < 0 or currentJson >= len(jsonData): # Give up if currentJson has invalid index
+            return
+
 
 #Redraws the viewer from currentJson / viewerSection / editedOnly.
 #scroll=True jumps to the selected section. keep=True stays at the current scroll position.
@@ -572,15 +615,12 @@ def viewerRenderSource(scroll=False, keep=False, scrollTo="top"):
             targetTime = viewerTimes[firstRow[viewerSection]]
             viewerScroll(targetTime)
 
-
-'''    viewer.yview_moveto(previous if keep else 0)
-
-    if scroll and (viewerSection in firstRow):
-        targetTime = viewerTimes[firstRow[viewerSection]]
-        viewerScroll(targetTime)'''
+    else:
+        # ???
+        return
 
 #Moved viewerRenderOutput
-def viewerRenderOutput(scrollTo="top", rebuild=True):
+def viewerRenderOutput(scrollTo="top"):
     # Tag meanings:
     # "secN" = message section of section N
     # "headerN" = section header row for section N
@@ -589,6 +629,12 @@ def viewerRenderOutput(scrollTo="top", rebuild=True):
     # "hang" = a message is indented, remainder pushed onto additional lines
     # "nm123456" = color tags, where 123456 are hex code values
     # "active_highlight" = message is scrolled onto and highlighted
+
+    print(f"{outputUseCache}")
+    print(f"viewerRenderOutput: viewerSection is {viewerSection}")
+    print(f"viewerRenderOutput: scrollTo is {scrollTo}")
+
+    viewerBuildOutput()
 
     # == GLOBALS ==
     global viewerTimes, outputPlayheadValue
@@ -643,6 +689,7 @@ def viewerRenderOutput(scrollTo="top", rebuild=True):
 
     elif (scrollTo == "section") and (0 <= viewerSection < len(sections)):
         firstRows = getSectionStarts()
+        print(f"viewerRenderOutput firstRows: {firstRows}")
         targetTime = firstRows[viewerSection]
         timelinesOutputSlider.set(targetTime)
         outputPlayheadValue = targetTime
@@ -655,7 +702,14 @@ def viewerRenderOutput(scrollTo="top", rebuild=True):
 
 # Output preview related functions
 def viewerBuildOutput():
-    global outputTimes, outputText, outputRanges, outputStampWidth#, outputFirstRows # added outputFirstRows
+    global outputText, outputRanges, outputStampWidth
+    global outputTimes, outputUseCache
+
+    print(f"len of sections is {len(sections)}")
+    
+    if outputUseCache:
+        return # Don't update output cache variables
+    
     starts = getSectionStarts() # Get list of starts
     outputTimes = []            # Reset output times
     #outputFirstRows = {}        # Reset dict of each section's first row index
@@ -666,11 +720,17 @@ def viewerBuildOutput():
         if not messages:
             continue
 
+        # Add visual indicator of sections moved around
+        ogIndex = (section.get("ogIndex", -1) + 1)
+        shiftedIndication = ""
+        if (i) != ogIndex:
+            shiftedIndication = f"({ogIndex + 1})"
+
         # Add section 
         header_t = starts[i]
-        header_name = f"===== SECTION {i + 1}"
+        header_name = f"====== SECTION {i + 1}{shiftedIndication}"
         header_color = "#FFFFFF"
-        header_body = f"START ====="
+        header_body = f"START ======"
         
         #outputCache.append((header_t, header_name, header_color, header_body))
         outputTimes.append(float(header_t))
@@ -688,8 +748,8 @@ def viewerBuildOutput():
         
         for msg in messages[left_idx:right_idx]:
             t, name, body, color = msg
-            name = viewerSmallCapsPass(name)
-            body = viewerSmallCapsPass(body)
+            #name = name
+            #body = body
             shifted_t = t + time_offset
             #outputCache.append((shifted_t, name, color, body))
             outputTimes.append(int(shifted_t))
@@ -700,6 +760,12 @@ def viewerBuildOutput():
 
     # Update output global variables
     outputText, outputRanges, outputStampWidth = viewerBuildText(rows)
+
+    # Next time, use this cache unless otherwise stated.
+    #print(f"[{outputText}]")
+    if outputText != "  : No sections in output timeline.":
+        print("yay")
+        outputUseCache = True
 
 def rangeStore(rangeSlider, index):
     values = rangeSlider.get() or [0, 100] #default to [0, 100] if range isn't stored
@@ -761,6 +827,13 @@ def rangeManagement(index):
     for key, (val1, val2, val3) in rangeSliderValues.items():
         print(f"{key}: {val1}, {val2}, {val3}")
 
+def jsonHighlight():
+    for i, entry in enumerate(jsonData):
+        if i == currentJson:
+            entry["button"].configure(border_width=3, border_color="#ff8181")
+        else:
+            entry["button"].configure(border_width=0)
+
 #Change 11/8/26: SelectJson now also tells the viewer which chatlog to show.
 #Renamed to jsonSelect
 def jsonSelect(index):
@@ -768,8 +841,9 @@ def jsonSelect(index):
     global currentJson, viewerSection
 
     rangeManagement(index)
-
     currentJson = index
+    jsonHighlight()
+
     viewerSection = -1 
     viewerRenderSource() #Draw it.
     if lastChatlogMode == "Full Sections Output":
@@ -786,13 +860,22 @@ def jsonSelect(index):
     # Update timeline to reflect selected JSON
     # Update timeline playheads to match current state
     tracksRedraw()
-    viewerBuildOutput()
+    outputUseCache = False
+    #viewerBuildOutput()
     viewerRenderAgnostic(scroll=True, scrollTo="playhead")
+
+def sectionHighlight():
+    for i, section in enumerate(sections):
+        if i == currentSection:
+            section["button"].configure(border_width=3, border_color="#B2FFB8")
+        else:
+            section["button"].configure(border_width=0)    
 
 def sectionCreate():
     #print(f"this is idiotic. whats the current json {currentJson}")
     if currentJson == -1:
         return
+    
     try:
         hourS = int(hourStart.get() or "0") #or "0" for when text entry is left empty
         minS = int(minStart.get() or "0")
@@ -818,14 +901,18 @@ def sectionCreate():
     rangeCreateButton.configure(fg_color = brightColors[colorID])
     sectionButton = customtkinter.CTkButton(
         master=sectionShelf,
-        text=str(len(sections)) + " - " + jsonData[currentJson]["name"] + "\n" + helpSecToString(start) + " - " + helpSecToString(end),
+        text=str(len(sections) + 1) + " - " + jsonData[currentJson]["name"] + "\n" + helpSecToString(start) + " - " + helpSecToString(end),
         command=lambda index=len(sections): sectionSelect(index)
     )
     sectionButton.configure(fg_color = brightColors[colorID], hover = False)                #note: ogIndex does not seem to do anything yet
     sections.append({"jsonIndex":currentJson, "start":start, "end":end, "button":sectionButton, "ogIndex":(len(sections) - 1), "color":brightColors[colorID], "darkerColor":yetDarkerColors[colorID]})
     sectionButton.grid(row=len(sections), column=0, padx=5, pady=5, sticky="nsew")
 
+    global outputUseCache
+    outputUseCache = False
+
     # "Select" the newly created section, handle internally which viewer is open
+    print(f"gonna select {len(sections) - 1}")
     sectionSelect(len(sections) - 1) #Note: Len makes a list of 1 object have a len value of 1
 
     #Redundant with sectionSelect
@@ -843,15 +930,25 @@ def sectionCreate():
     #    ScrollViewer(chatlogPlayheadValue)
 
 def sectionSelect(index):
-    global currentSection, currentJson, viewerSection #Change 11/12/26: Removed viewerJson
+    global currentSection, currentJson, viewerSection
+    global outputUseCache, outputJumppoint
 
-    #print(f"index is {index}")
+    print(f"index is {index}")
 
     # == UPDATE CURRENT SECTION ==
     # Update currentSection. if index starts at 0, len of sectionList should be 1
+    # ALSO updates viewerSection
     if -1 < index < len(sections):
         currentSection = index
         viewerSection = index
+        sectionHighlight()
+    else:
+        sectionHighlight()
+        tracksRedraw()
+        viewerRenderAgnostic(scrollTo="top")
+        return
+
+    print(f"len(sections) is {len(sections)}")
 
     # == UPDATE CURRENT JSON ==
     #selected section might be on a different chatlog
@@ -862,39 +959,67 @@ def sectionSelect(index):
         #(f"currentJson: {currentJson}")
         #print(f"jsonIndex: {jsonIndex}")
         currentJson = jsonIndex
+        jsonHighlight()
         rangeSourceTitle.configure(text="Current Source: " + jsonData[currentJson]["name"])
 
     # == UPDATE TIMELINE, WHICH UPDATES VIEWER ==
     tracksRedraw()
-    viewerBuildOutput()
+    outputUseCache = False
+    outputJumppoint = "section" # next switch to output will emphasize "section"
+    #viewerBuildOutput()
     viewerRenderAgnostic(scroll=True, scrollTo="section")
 
 def sectionSwap(index1, index2):
-    global sections
+    global sections, outputUseCache, viewerSection, currentSection
+    outputUseCache = False
+
+    # Swap button commands and grid positions
     sections[index1]["button"].configure(command=lambda index=index2: sectionSelect(index)) #swapping lamda commands
     sections[index2]["button"].configure(command=lambda index=index1: sectionSelect(index))
     sections[index1]["button"].grid(row=index2 + 1) #swapping location in sectionEditor
     sections[index2]["button"].grid(row=index1 + 1) #+1 to account for title label
+
+    # Swap list elements
     sections[index1], sections[index2] = sections[index2], sections[index1] #swapping sectionList elements using tuple unpacking
+
+    currentSection = index2
+    viewerSection = index2
+    sectionHighlight()
+    tracksRedraw()
+    viewerRenderAgnostic(scrollTo="section")
     return
 
 def sectionDelete(index):
-    global sections
-    for i in range(index, len(sections)-1): #From index to second last index
-        sectionSwap(i, i+1)
-    sections[-1]["button"].destroy()
-    sections.pop(index)
-    tracksRedraw()
-    viewerBuildOutput()
-    viewerRenderAgnostic(keep=True, scrollTo="keep")
+    global sections, currentSection, viewerSection, outputUseCache
+    if not sections or not (0 <= index < len(sections)):
+        return
+
+    sections[index]["button"].destroy() # eliminate section visual
+    sections.pop(index)              # eliminate section data
+
+    for i, section in enumerate(sections):
+        section["button"].configure(command=lambda target=i: sectionSelect(target))
+        section["button"].grid(row=i + 1)
+
+    if not sections:
+        currentSection = 0
+        viewerSection = -1
+        sectionHighlight()
+        tracksRedraw()
+        viewerRenderAgnostic(scrollTo="top")
+    else:
+        currentSection = min(index, len(sections) - 1)
+        viewerSection = currentSection
+        sectionSelect(currentSection)
 
 # Ensures section colors aren't repeated in sequence.
 def sectionGenColor():
-    global lastColor
+    global lastColors
     colorID = random.randint(0, 7)
-    while brightColors[colorID] == lastColor:
+    while brightColors[colorID] in lastColors:
         colorID = random.randint(0, 7)
-    lastColor = brightColors[colorID]
+    lastColors.pop(0)
+    lastColors.append(brightColors[colorID])
     return colorID
 
 # Checks whether the section timestamps make sense, and updates the end accordingly.
@@ -1378,10 +1503,9 @@ def viewerModeSelect(mode):
 
     # Preview output
     elif mode == "Full Sections Output":
-        viewerRenderOutput(scrollTo="playhead", rebuild=False)
+        viewerRenderOutput(scrollTo=outputJumppoint)
         viewerScroll(outputPlayheadValue)
     
-        
 # Render the current chat row into "small caps" format
 # using funny unicode characters
 # can't really be covered by simple font changes
@@ -1397,7 +1521,7 @@ def viewerSmallCapsPass(text):
 # Goes to the viewer object and changes its font
 # based on what is chosen in settings
 def viewerUpdateFont(font):
-    global settingsSmallCaps, viewerTimes
+    global settingsSmallCaps, viewerTimes, outputUseCache
 
     if fontPreview.get() == 1:
         if(font == "Small Caps"):
@@ -1426,6 +1550,7 @@ def viewerUpdateFont(font):
         family, size = fontDict.get(font, fontDict["Defaults"])
         viewerFont.configure(family=family, size=size)
 
+        outputUseCache = False
         viewerBuildOutput() #need to rebuild the output to force small caps on/off
 
         if(viewerModeButtons.get() == "Full Sections Output"):
@@ -1442,14 +1567,15 @@ def viewerUpdateFont(font):
 # such as resetting the font to Courier New,
 # or switching to the just-selected font
 def viewerFontReset():
-    global settingsSmallCaps, viewerTimes
+    global settingsSmallCaps, viewerTimes, outputUseCache
     # If set OFF, then reset visualizer to default font.
     if fontPreview.get() == 0:
         #print("TURN OFF FONTS")
         viewerFont.configure(family="Courier New", size=11)
         settingsSmallCaps = False
 
-        viewerBuildOutput() #need to rebuild the output to force small caps on/off
+        outputUseCache = False
+        #viewerBuildOutput() #need to rebuild the output to force small caps on/off
 
         # ONLY FOR IF SWITCHED OFF, clone of this in UpdateViewerFont
         # Rebuild the correct viewer based on active mode
@@ -1488,10 +1614,11 @@ def tracksChatlogDragged():
         viewerScroll(chatlogPlayheadValue)
 
 def tracksOutputDragged():
-    global outputPlayheadValue
+    global outputPlayheadValue, outputJumppoint
 
     #Reassign outputPlayheadValue for the sake of updating the playhead objects.
     outputPlayheadValue = tracksUpdatePlayhead(timelinesOutputSlider, outputPlayheadLine, yttLine, outputPlayheadText, getYTTDuration())
+    outputJumppoint = "playhead" # switching modes will emphasize playhead
 
     # Update timeline titles.
     tracksUpdateTitles()
@@ -1727,7 +1854,7 @@ viewer.tag_config("hang", lmargin2=viewerFont.measure("0") * (outputStampWidth +
 viewer.tag_config("st")
 # Tag for highlighted messages under scroll
 viewer.tag_config("active_highlight", background="#0a0a0a")
-
+viewer.tag_config("header", foreground="#ffffff", font=viewerTimeFont)
 
 #--------------------------------------------------------------------------
 #Timelines. Where the currently selected JSON's timeline is displayed, and where the total YTT section view is displayed.
@@ -1802,7 +1929,8 @@ timelinesOutputSlider.place(x=43, y=252), timelinesOutputSlider.set(0)
 # Timeline Management
 
 def tracksRedraw():
-    global viewerTimes, outputTimes
+    global viewerTimes, outputTimes, outputUseCache
+    outputUseCache = False
     timelines.delete("sections")
 
     duration = getYTTDuration()
@@ -1858,25 +1986,21 @@ def viewerRenderAgnostic(keep=False, scroll=True, scrollTo="top"):
         #print(f"tracksRedraw scroll = {scroll}")
         viewerRenderSource(keep=keep, scroll=scroll)  #Refresh the viewer whenever sections are created, deleted or reordered.
 
+
 #--------------------------------------------------------------------------
 # Keyboard Input
 def KeyPress(event): #No switch statement cus I don't want to mess with python versions
-    global currentSection
+    global currentSection, viewerSection
     if event.keysym == "Up":
         if currentSection > 0:
             sectionSwap(currentSection, currentSection - 1)
-            currentSection = currentSection - 1
-            tracksRedraw(keep=True)
     elif event.keysym == "Down":
         if currentSection < len(sections) - 1:
             sectionSwap(currentSection, currentSection + 1)
-            currentSection = currentSection + 1
-            tracksRedraw(keep=True)
     elif event.keysym == "Delete":
-        if isinstance(app.focus_get(), customtkinter.CTkEntry):
-            return  # Let the entry handle Delete normally
-        else:
-            sectionDelete(currentSection)
+        if not isinstance(app.focus_get(), customtkinter.CTkEntry):
+            sectionDelete(currentSection)  # Let the entry handle Delete normally
+            
 app.bind("<KeyPress>", KeyPress)
 
 # Entry box keybinds:
