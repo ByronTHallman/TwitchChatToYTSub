@@ -1,0 +1,43 @@
+{
+    "FileInfo": {
+        "Version": {
+            "Major": 4,
+            "Minor": 2,
+            "Patch": 0
+        },
+        "CreatedAt": "0000-00-00T00:00:00.0000000-00:00",
+        "UpdatedAt": "0000-00-00T00:00:00"
+    },
+    "streamer": {
+        "name": "Empty",
+        "login": "Empty",
+        "id": 69420
+    },
+    "clipper": null,
+    "video": {
+        "title": "Empty",
+        "description": null,
+        "id": "6942069420",
+        "created_at": "0000-00-00T00:00:00Z",
+        "start": 0,
+        "end": 86400,
+        "length": 86400,
+        "viewCount": 0,
+        "game": "Empty",
+        "chapters": [
+            {
+                "id": "",
+                "startMilliseconds": 0,
+                "lengthMilliseconds": 86400000,
+                "type": "Empty",
+                "description": "Empty",
+                "subDescription": "",
+                "thumbnailUrl": null,
+                "gameId": "0000000000",
+                "gameDisplayName": "Empty",
+                "gameBoxArtUrl": "https://HowDoITalkToPeople.jpg"
+            }
+        ]
+    },
+    "comments": []
+}
