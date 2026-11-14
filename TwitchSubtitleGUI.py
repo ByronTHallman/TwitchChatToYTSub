@@ -37,23 +37,21 @@ customtkinter.set_default_color_theme("dark-blue")
 app = customtkinter.CTk()  # creates the window
 app.geometry("1000x800")
 app.resizable(False, False) #The timelines sorta break if the window is resizable.
-app.title("where even am i")
+app.title("I Played Tony Hawk's Ride Once and It Sucked")
 app.focus_force()
 
 # Colors
-brightColors = [ #Some hand-picked OKLCH colors
+brightColors = [ # Some hand-picked OKLCH colors
     "#973c5d", "#964601", "#4c6c01", "#04733a",
-    "#007078", "#0164a3", "#5c52a3", "#824387"
-]
-yetDarkerColors =[
+    "#007078", "#0164a3", "#5c52a3", "#824387"]
+yetDarkerColors = [ # Hand-picked darker, desaturated equivalents for visualizer.
   "#4d2634", "#5a4234", "#343d1f", "#234132",
-  "#224143", "#304a5b", "#474466", "#5e4c5f"
-]
-lastColor = "#000000" #The last used color so we don't use it again
-TwitchUserColors = (
+  "#224143", "#304a5b", "#474466", "#5e4c5f"]
+TwitchUserColors = ( # Random colors directly from Twitch for unassigned name colors
     "#0000FF", "#8A2BE2", "#5F9EA0", "#D2691E", "#FF7F50",
     "#1E90FF", "#B22222", "#DAA520", "#008000", "#FF69B4",
     "#FF4500", "#FF0000", "#2E8B57", "#00FF7F", "#9ACD32",)
+lastColors = ["#000000", "#000000", "#000000", "#000000"] # Ensures that the last 4 colors aren't repeats
 
 # Source management global variables
 jsonData = []      # List of dictionaries for full chatlogs. "path", "name", "endTime"
@@ -82,12 +80,14 @@ viewerTimes = []                 # Stored message time values for chat viewer in
 settingsSmallCaps = False           # Global check for if the "Small Caps" font is being used
 lastChatlogMode = "Source Preview"  # Keeps track of the last used chatlog viewer mode
 
-# Output global variables for viewer's output mode
-#outputCache = []    # Stores (shifted_time, name, color, body)
+# Output global variables to store viewer's output mode data
 outputTimes = []     # Stores all OUTPUT message times, used for bisect searching section endpoints
-outputRows = ""      # Pre-rendered text string
+outputText = ""      # Pre-rendered text string
 outputRanges = {}    # Pre-computed tag ranges
 outputStampWidth = 0 # Pre-calculated timestamp column width
+outputFirstRows = {}  # Tracks section starting times
+outputUseCache = False
+outputJumppoint = "playhead"
 
 # Tempfile global variables
 tempDownloads = [] #Any file downloaded by URL will be added to this list to be removed on shutdown
@@ -135,7 +135,7 @@ def importFileJSON(importEmpty):
 
 
     # Take stream info metadata to create chatlog label.
-    json_metadata = importsQueryJSON(imported_data)
+    json_metadata = importQueryJSON(imported_data)
 
     # Write label info
     json_label = f"{json_metadata['streamer']}, {json_metadata['date']}\nGame: {json_metadata['game']}"
@@ -151,8 +151,9 @@ def importFileJSON(importEmpty):
         json_label = Path(filePath).stem
 
     # Attach this JSON to the chain of chatlog information.
-    jsonData.append({"path":filePath, "name":json_label, "endTime":duration})
-    if len(jsonData) >= 1 and not importEmpty:
+
+    jsonData.append({"path":filePath, "name":json_label, "endTime":duration, "button": jsonCard})
+    if len(jsonData) >= 2:
         #print(len(jsonData) - 1)
         jsonSelect(len(jsonData) - 1)
 
@@ -160,6 +161,7 @@ def importFileJSON(importEmpty):
         # "jsonData" as a list of dicts, containing: 
         # filepath, vod label, length, comments 
         # "comments" as list of dicts, containing commenter, messages, and content_offset_seconds
+
     if not importEmpty:
         jsonCard.configure(
             text=str(len(jsonData)-1)
@@ -185,20 +187,26 @@ def importFileJSON(importEmpty):
 
     # Refresh viewer contents 
     if lastChatlogMode == "Full Sections Output":
-        viewerRenderOutput(keep=True)
+        viewerRenderOutput(scrollTo="keep")
         viewerScroll(outputPlayheadValue)
     else:
-        viewerRender(keep=True)
+        viewerRenderSource(keep=True)
         viewerScroll(chatlogPlayheadValue)
 
     # Redraw the timelines because new "current chatlog" is now different
     # And should be, by definition, blank.
     tracksRedraw()
-    print(f"ok json current is {currentJson}")
+    outputUseCache = False
+    # viewerBuildOutput()
+    viewerRenderAgnostic()
+    # print(f"ok json current is {currentJson}")
 def importEmptyJSON():
     importFileJSON(True)
 def importJSON():
     importFileJSON(False)
+
+
+
 
 # This works now. Make sure to build with
 # this specific build of chat-downloader.
@@ -252,7 +260,7 @@ def importDownloadURL():
 
             #  == LABEL ==
             # Get metadata for label information.
-            vod_metadata = importsQueryVOD(vod_chat, first_message) #metadata dict
+            vod_metadata = importQueryVOD(vod_chat, first_message) #metadata dict
             vod_label = jsonWriteLabel(vod_metadata, vod_chat) #label string
             vod_duration = vod_metadata.get('duration', 0) #shortens stuff later
 
@@ -315,13 +323,13 @@ def importDownloadURL():
             # filepath, vod label, length, comments 
             # "comments" as list of dicts, containing commenter, messages, and content_offset_seconds 
         def update_ui():
-            jsonData.append({"path": vod_tempfile, "name": vod_label, "endTime": vod_duration, "comments": downloaded_comments})
+            jsonData.append({"path": vod_tempfile, "name": vod_label, "endTime": vod_duration, "comments": downloaded_comments, "button": urlCard})
             if len(jsonData) >= 1:
                 jsonSelect(len(jsonData) - 1)
 
             # Update the "downloading" label to reflect the VOD's information
             urlCard.configure(
-                text=str(len(jsonData)-1) 
+                text=str(len(jsonData)) 
                 + " - " + jsonData[-1]["name"] 
                 + "\nDuration: " 
                 + "(" 
@@ -336,21 +344,24 @@ def importDownloadURL():
 
     # Refresh viewer contents 
     if lastChatlogMode == "Full Sections Output":
-        viewerRenderOutput(keep=True)
+        viewerRenderOutput(scrollTo="playhead")
         viewerScroll(outputPlayheadValue)
     else:
-        viewerRender(keep=True)
+        viewerRenderSource(keep=True)
         viewerScroll(chatlogPlayheadValue)
 
     # Redraw the timelines because new "current chatlog" is now different
     # And should be, by definition, blank.
     tracksRedraw()
+    outputUseCache = False
+    #viewerBuildOutput()
+    viewerRenderAgnostic()
 
     # Entire program froze during download 
     # unless threading was brought in.
     threading.Thread(target=download, daemon=True).start()
 
-    print(f"ok json current is {currentJson}")
+    #print(f"ok json current is {currentJson}")
 
 
 #--------------------------------------------------------------------------
@@ -432,7 +443,7 @@ def viewerLoadMessages(index):
 #Sections is a list of (position in sectionList, section dict) for this chatlog.
 #Returns (rows, firstRow). rows is a list of (timestamp, name, name color, body, tag), tag is "out" or "sec<position>".
 #firstRow maps position -> index of that section's first row.
-def viewerBuildRows(messages, sections, selected, editedOnlyMode):
+def viewerBuildSource(messages, sections, selected, editedOnlyMode):
     rows = []
     firstRow = {}
     timeList = [] # let's not throw time away
@@ -476,59 +487,130 @@ def viewerBuildText(rows):
     ranges = {}
 
     #Adds one (line, startColumn, endColumn) range to a tag's list, creating the list the first time.
-    def AddRange(tag, line, startColumn, endColumn):
+    def AddRange(tag, row, startColumn, endColumn):
         if tag not in ranges:
             ranges[tag] = []
-        ranges[tag].append((line, startColumn, endColumn))
+        ranges[tag].append((row, startColumn, endColumn))
     
-    for n, (stamp, name, color, body, tag) in enumerate(rows, start=1):
+    for row, (stamp, name, color, body, tag) in enumerate(rows, start=1): # iterate across rows, start at 1
         head = stamp.ljust(stampWidth) + "  "
         label = name + ":"
-        line = viewerSmallCapsPass(head + label + " " + body) #in case the Small Caps font is used, reformat the preview text accordingly
+        content = label + " " + body
+        is_header = name.startswith("=====")
+        if not is_header:
+            content = viewerSmallCapsPass(content)
+        line = head + content #in case the Small Caps font is used, reformat the preview text accordingly
         nameStart = len(head)
         nameEnd = nameStart + len(label)
         lines.append(line)
-        AddRange("ts", n, 0, stampWidth)
-        AddRange("nm" + color[1:], n, nameStart, nameEnd) #one tag per name color, like nm1E90FF
+        AddRange("timestamp", row, 0, stampWidth)
+        if is_header:
+            AddRange("header", row, nameStart, len(line))
+        AddRange("name" + color[1:], row, nameStart, nameEnd) #one tag per name color, like nm1E90FF
         if tag == "out":
-            AddRange(tag, n, nameEnd, len(line)) #only the message text is gray
+            AddRange(tag, row, nameEnd, len(line)) #only the message text is gray
         else:
-            AddRange(tag, n, 0, None) #the whole line, so the section is highlighted as a block
+            AddRange(tag, row, 0, None) #the whole line, so the section is highlighted as a block
+
+    # Concatenate every line with \n, return as (all rows, ranges, widths)
     return "\n".join(lines), ranges, stampWidth
 
+def viewerRender(keep=False, scroll=False, scrollTo="top", mode="source"):
+    # Tag meanings:
+    # "secN" = message section of section N
+    # "headerN" = section header row for section N
+    # "timestamp" = self explanatory
+    # "out" = message is not in a section
+    # "hang" = a message is indented, remainder pushed onto additional lines
+    # "nm123456" = color tags, where 123456 are hex code values
+    # "active_highlight" = message is scrolled onto and highlighted
+
+    # == GLOBALS ==
+    global viewerSection, viewerTimes, outputPlayheadValue
+    mode = viewerModeButtons.get()
+
+    # Store preview view position. Unsure if this is ever used.
+    previous = viewer.yview()[0]
+
+    # Temporary
+    if keep:
+        scrollTo = "keep"
+    if scroll:
+        scrollTo = "section"
+
+    if mode == "Full Sections Output":
+        viewerBuildOutput()  # Does nothing if outputUseCache is True
+        text = outputText
+        ranges = outputRanges
+        stampWidth = outputStampWidth
+        firstRow = outputFirstRows
+        viewerTimes = outputTimes
+    else:  
+        if currentJson < 0 or currentJson >= len(jsonData): # Give up if currentJson has invalid index
+            return
+
+
 #Redraws the viewer from currentJson / viewerSection / editedOnly.
-#Change: Got rid of viewerJson, completely redundant variable
 #scroll=True jumps to the selected section. keep=True stays at the current scroll position.
-def viewerRender(scroll=False, keep=False):
+def viewerRenderSource(scroll=False, keep=False, scrollTo="top"):
+    # Tag meanings:
+    # "secN" = message section of section N
+    # "headerN" = section header row for section N
+    # "timestamp" = self explanatory
+    # "out" = message is not in a section
+    # "hang" = a message is indented, remainder pushed onto additional lines
+    # "nm123456" = color tags, where 123456 are hex code values
+    # "active_highlight" = message is scrolled onto and highlighted
+
+    # Temporary
+    if keep:
+        scrollTo = "keep"
+    if scroll:
+        scrollTo = "section"
+
+    # == GLOBALS ==
     global viewerSection, viewerTimes # need to catch the times for highlighted comment mechanic
-    #Give up if currentJson has invalid index
+    
+    # Give up if currentJson has invalid index
     if currentJson < 0 or currentJson >= len(jsonData):
         return
-    if not (0 <= viewerSection < len(sections) and sections[viewerSection]["jsonIndex"] == currentJson):
-        viewerSection = -1 #the selected section was deleted or belongs to another chatlog
-    #Collect the sections that belong to the chatlog being shown, along with their position in sectionList.
+    # Reset "viewerSection" global if invalid
+    if ((viewerSection < 0 or viewerSection >= len(sections)) # is viewerSection out of bounds?
+        or (sections[viewerSection]["jsonIndex"] != currentJson)): # pointing to a different section?
+            viewerSection = -1
+
+    # Store preview view position. Unsure if this is ever used.
+    previous = viewer.yview()[0]
+
+    # == FILTER SECTIONS ==
+    # Collect the sections that belong to the chatlog being shown, 
+    # along with their position in sectionList.
     filteredSections = []
-    for position, section in enumerate(filteredSections):
+    for sectionListIndex, section in enumerate(sections):
         if section["jsonIndex"] == currentJson:
-            filteredSections.append((position, section))
-    rows, firstRow, viewerTimes = viewerBuildRows(viewerLoadMessages(currentJson), filteredSections, viewerSection, editedOnly)
+            filteredSections.append((sectionListIndex, section))
+    rows, firstRow, viewerTimes = viewerBuildSource(viewerLoadMessages(currentJson), filteredSections, viewerSection, editedOnly)
+
+    # == EMPTY CHATLOG? ==
     if not rows:
         rows = [("", "", "#bbbbbb", "No sections in this chatlog yet." if editedOnly else "This chatlog has no messages.", "out")]
     text, ranges, stampWidth = viewerBuildText(rows)
-    previous = viewer.yview()[0]
 
-    viewer.configure(state="normal")
-    viewer.delete("1.0", "end")
-    viewer.tag_config("ts", foreground="#6fa8dc", font=viewerTimeFont) # Timestamp. Abbreviated for text parsing optimization?
-    viewer.tag_config("out", foreground="#8a8a8a")
-    viewer.tag_config("hang", lmargin2=viewerFont.measure("0") * (stampWidth + 2)) #wrapped lines line up under the message
-    for position, section in filteredSections:
-        viewer.tag_config("sec" + str(position), background=section["darkerColor"], foreground="#ffffff")
+    # == START RENDER ==
+    viewer.configure(state="normal") # enable editing to change the text
+    viewer.delete("1.0", "end") # DELETES THE ENTIRE VIEWER'S CONTENTS LOL
+
+    for sectionListIndex, section in filteredSections:
+        viewer.tag_config("sec" + str(sectionListIndex), background=section["darkerColor"], foreground="#ffffff")
+
+    # == INSERT TEXT INTO VIEWER ==
     viewer.insert("1.0", text)
-    viewer.tag_add("hang", "1.0", "end")
+    viewer.tag_add("hang", "1.0", "end") # Apply hang tag to everything
+
+    # == FORMATTER ==
     for tag, spans in ranges.items():
-        if tag.startswith("nm"):
-            viewer.tag_config(tag, foreground="#" + tag[2:])
+        if tag.startswith("name"):
+            viewer.tag_config(tag, foreground="#" + tag[4:])
             viewer.tag_raise(tag) #name color must win over the block's white text
         indexes = []
         for line, startColumn, endColumn in spans:
@@ -539,43 +621,265 @@ def viewerRender(scroll=False, keep=False):
                 indexes.append(f"{line}.{endColumn}")
         for i in range(0, len(indexes), 2000): #tag many ranges per call, much faster than one by one
             viewer.tag_add(tag, *indexes[i:i + 2000])
-    viewer.tag_raise("ts")
 
-    viewer.tag_config("active_highlight", background="#0a0a0a") # Or any color you prefer
-    for tag in ranges:
-        if tag.startswith("nm"):
-            viewer.tag_raise(tag) # Ensure name colors still pop over the background
-            viewer.tag_raise("active_highlight")
+    viewer.tag_raise("timestamp")
+    viewer.tag_raise("active_highlight")
 
+    # == STOP RENDER ==
     viewer.configure(state="disabled")
 
-    viewer.yview_moveto(previous if keep else 0)
-    print(f"VIEWERSECTION: {viewerSection}")
-    print(f"FIRSTROW VIEWERSECTION: {list(firstRow)}")
-    print(f"viewerRender scroll = {scroll}")
-    if scroll and (viewerSection in firstRow):
-        print("WHY NO WORK")
-        viewer.yview(f"{firstRow[viewerSection] + 1}.0") #put the section's first message at the top
+    if scrollTo == "keep":
+        viewer.yview_moveto(previous) 
+
+    elif scrollTo == "top":
+        viewer.yview_moveto(0)
+
+    elif scrollTo == "playhead":
+        viewerScroll(chatlogPlayheadValue)
+
+    elif ((scrollTo == "section")
+        and (viewerSection in firstRow)):
+            targetTime = viewerTimes[firstRow[viewerSection]]
+            viewerScroll(targetTime)
+
+    else:
+        # ???
+        return
+
+#Moved viewerRenderOutput
+def viewerRenderOutput(scrollTo="top"):
+    # Tag meanings:
+    # "secN" = message section of section N
+    # "headerN" = section header row for section N
+    # "timestamp" = self explanatory
+    # "out" = message is not in a section
+    # "hang" = a message is indented, remainder pushed onto additional lines
+    # "nm123456" = color tags, where 123456 are hex code values
+    # "active_highlight" = message is scrolled onto and highlighted
+
+    print(f"{outputUseCache}")
+    print(f"viewerRenderOutput: viewerSection is {viewerSection}")
+    print(f"viewerRenderOutput: scrollTo is {scrollTo}")
+
+    viewerBuildOutput()
+
+    # == GLOBALS ==
+    global viewerTimes, outputPlayheadValue
+
+    # Update viewerTimes for Output mode.
+    viewerTimes = outputTimes
+
+    # Store preview view position. Unsure if this is ever used.
+    previous = viewer.yview()[0]
+
+    # Edit prep
+    viewer.configure(state="normal") # enable editing to change the text
+    viewer.delete("1.0", "end") # DELETES THE ENTIRE VIEWER'S CONTENTS LOL
+
+    # Position for section number, section as corresponding dictionary itself
+    for sectionListIndex, section in enumerate(sections):
+        viewer.tag_config("sec" + str(sectionListIndex), background=section["darkerColor"], foreground="#ffffff")
+
+    # == INSERT TEXT INTO VIEWER ==
+    viewer.insert("1.0", outputText)
+    viewer.tag_add("hang", "1.0", "end") # Apply hang tag to everything
+
+    # == FORMATTER ==
+    for tag, spans in outputRanges.items(): #outputRanges exists so that re-calculating isnt necessary every single reorder or tab switch
+        if tag.startswith("name"):
+            viewer.tag_config(tag, foreground="#" + tag[4:])
+            viewer.tag_raise(tag)
+        indexes = []
+        for line, startColumn, endColumn in spans:
+            indexes.append(f"{line}.{startColumn}")
+            if endColumn is None:
+                indexes.append(f"{line + 1}.0")
+            else:
+                indexes.append(f"{line}.{endColumn}")
+        for i in range(0, len(indexes), 2000):
+            viewer.tag_add(tag, *indexes[i:i + 2000])
+            
+    viewer.tag_raise("timestamp") # Enforce text color on timestsamps
+    viewer.tag_raise("active_highlight") # Overwrite section color with highlight
+
+    # == STOP RENDER ==
+    viewer.configure(state="disabled")
+
+    if scrollTo == "keep":
+        viewer.yview_moveto(previous)
+
+    elif scrollTo == "top":
+        viewer.yview_moveto(0)
+
+    elif scrollTo == "playhead":
+        viewerScroll(outputPlayheadValue)
+
+    elif (scrollTo == "section") and (0 <= viewerSection < len(sections)):
+        firstRows = getSectionStarts()
+        print(f"viewerRenderOutput firstRows: {firstRows}")
+        targetTime = firstRows[viewerSection]
+        timelinesOutputSlider.set(targetTime)
+        outputPlayheadValue = targetTime
+        tracksRefreshPlayheads()
+        viewerScroll(targetTime) #neither of these work
+
+    else:
+        # ???
+        return
+
+# Output preview related functions
+def viewerBuildOutput():
+    global outputText, outputRanges, outputStampWidth
+    global outputTimes, outputUseCache
+
+    print(f"len of sections is {len(sections)}")
+    
+    if outputUseCache:
+        return # Don't update output cache variables
+    
+    starts = getSectionStarts() # Get list of starts
+    outputTimes = []            # Reset output times
+    #outputFirstRows = {}        # Reset dict of each section's first row index
+    rows = []                   # Init rows
+    
+    for i, section in enumerate(sections):
+        messages = viewerLoadMessages(section["jsonIndex"])
+        if not messages:
+            continue
+
+        # Add visual indicator of sections moved around
+        ogIndex = (section.get("ogIndex", -1) + 1)
+        shiftedIndication = ""
+        if (i) != ogIndex:
+            shiftedIndication = f"({ogIndex + 1})"
+
+        # Add section 
+        header_t = starts[i]
+        header_name = f"====== SECTION {i + 1}{shiftedIndication}"
+        header_color = "#FFFFFF"
+        header_body = f"START ======"
+        
+        #outputCache.append((header_t, header_name, header_color, header_body))
+        outputTimes.append(float(header_t))
+        rows.append((helpSecToString(int(header_t)), header_name, header_color, header_body, f"sec{i}"))
+        
+        sectStart = section["start"] #wait, isn't this redundant...?
+        sectEnd = section["end"]
+        
+        # Fast bisect slicing to find endpoints of sections
+        # instead of parsing every message directly
+        # O(N) -> O(log N)
+        left_idx = bisect.bisect_left(messages, (sectStart,))
+        right_idx = bisect.bisect_right(messages, (sectEnd,))
+        time_offset = starts[i] - sectStart
+        
+        for msg in messages[left_idx:right_idx]:
+            t, name, body, color = msg
+            #name = name
+            #body = body
+            shifted_t = t + time_offset
+            #outputCache.append((shifted_t, name, color, body))
+            outputTimes.append(int(shifted_t))
+            rows.append((helpSecToString(int(shifted_t)), name, color, body, f"sec{i}")) #tags each message with corresponding section index
+        
+    if not rows:
+        rows = [("", "", "#bbbbbb", "No sections in output timeline.", "out")]
+
+    # Update output global variables
+    outputText, outputRanges, outputStampWidth = viewerBuildText(rows)
+
+    # Next time, use this cache unless otherwise stated.
+    #print(f"[{outputText}]")
+    if outputText != "  : No sections in output timeline.":
+        print("yay")
+        outputUseCache = True
+
+def rangeStore(rangeSlider, index):
+    values = rangeSlider.get() or [0, 100] #default to [0, 100] if range isn't stored
+    rangeSliderValues[index] = (values[0], values[1], rangeSlider.cget("to")) #add positions and endpoint
+
+def rangePull(index):
+    rangeTriple = (0, 100, 100) #Default values
+
+    if index in rangeSliderValues:
+        rangeTriple = rangeSliderValues.get(index) # Take stored ranges if available
+    elif -1 < index < len(jsonData):
+        endTime = jsonData[index].get("endTime", 100) # Normal case of new source, take endTime.
+        rangeTriple = (0, endTime, endTime)
+    else:
+        print("...There's no sources. How did you even get here?") # currentJson == -1, No sources.
+        print("...Well, I guess you didn't import anything. Weirdo.") # Wait, this should be impossible.
+        print("Warning: No Range Values Available")                     # The only call can't reach this...
+
+    return rangeTriple
+
+def rangeManagement(index):
+    if(currentJson > -1): #Shouldn't have to check for this, but whatever
+        if(currentJson != index): # are we not clicking a JSON we are already looking at?
+            #1. store stupid current slider state
+            rangeStore(rangeSlider, currentJson) # adds a triple to rangeSliderValues: (left, right, and length) from CURRENT json
+
+            #2. pull dumb state for new json key 
+            rangeLeft, rangeRight, rangeLimit = rangePull(index) # PULLS a triple, left, rights, lenght; defaults to (0, 100, 100)
+
+            #3. set the sliders in the right place. and markers
+            rangeSlider.configure(to=rangeLimit)    # set limit
+            rangeSlider.set((rangeLeft, rangeRight))  # set handles
+            rangeMoveMarker(rangeLeft, "left")
+            rangeMoveMarker(rangeRight, "right")
+
+            #4. update boxes
+            rangeUpdateBoxes(hourStart, minStart, secStart, rangeLeft)
+            rangeUpdateBoxes(hourEnd, minEnd, secEnd, rangeRight)
+        else:
+            print("Warning: Clicking Already Open JSON, what are you doing?") # currentJson == index
+            print(f"RangePull LOG CurrentJson: {currentJson}")
+            print(f"RangePull LOG Index: {index}")
+
+    else:
+        #print("rangemanagement here, hey your current json is -1")
+        if index < len(jsonData):
+            endTime = jsonData[index]["endTime"] #first JSON is a special case
+        else:
+            return
+        #1. move sliders and markers
+        rangeSlider.configure(to=endTime)
+        rangeSlider.set((0, endTime)) # Reset knobs to start and end
+        rangeMoveMarker(0, "left")
+        rangeMoveMarker(endTime, "right")
+        #2. update boxes
+        rangeUpdateBoxes(hourStart, minStart, secStart, 0)
+        rangeUpdateBoxes(hourEnd, minEnd, secEnd, endTime)
+
+    for key, (val1, val2, val3) in rangeSliderValues.items():
+        print(f"{key}: {val1}, {val2}, {val3}")
+
+def jsonHighlight():
+    for i, entry in enumerate(jsonData):
+        if i == currentJson:
+            entry["button"].configure(border_width=3, border_color="#ff8181")
+        else:
+            entry["button"].configure(border_width=0)
 
 #Change 11/8/26: SelectJson now also tells the viewer which chatlog to show.
 #Renamed to jsonSelect
 def jsonSelect(index):
     # TODO write current range slider handles to tuples and assign to dict with currentJson as key before reassignment
     global currentJson, viewerSection
+
+    rangeManagement(index)
     currentJson = index
+    jsonHighlight()
+
     viewerSection = -1 
-    viewerRender() #Draw it.
+    viewerRenderSource() #Draw it.
     if lastChatlogMode == "Full Sections Output":
         viewerScroll(outputPlayheadValue)
     else:
         viewerScroll(chatlogPlayheadValue)
-    rangeCurrChatlog.configure(
+    rangeSourceTitle.configure(
         text="Current Source: " + jsonData[currentJson]["name"]
     )
-
-    endTime = jsonData[currentJson]["endTime"]
-    rangeSlider.configure(to=endTime)
-    rangeSlider.set((0, endTime)) # Reset knobs to start and end
 
     # Force text boxes to match the new reset slider
     # SectionSliderDragged([0, endTime])
@@ -583,7 +887,16 @@ def jsonSelect(index):
     # Update timeline to reflect selected JSON
     # Update timeline playheads to match current state
     tracksRedraw()
-    tracksRefreshPlayheads()
+    outputUseCache = False
+    #viewerBuildOutput()
+    viewerRenderAgnostic(scroll=True, scrollTo="playhead")
+
+def sectionHighlight():
+    for i, section in enumerate(sections):
+        if i == currentSection:
+            section["button"].configure(border_width=3, border_color="#B2FFB8")
+        else:
+            section["button"].configure(border_width=0)    
 
 def sectionCreate(isEmpty):
     global currentJson
@@ -623,14 +936,13 @@ def sectionCreate(isEmpty):
     #Update endpoint depending on validity of inputs.
     end = sectionValidEnds(start, end, maxEnd)
     if(end == 0):
-        print("wtf it failed")
         return
 
     colorID = sectionGenColor()
     rangeCreateButton.configure(fg_color = brightColors[colorID])
     sectionButton = customtkinter.CTkButton(
         master=sectionShelf,
-        text=str(len(sections)) + " - " + jsonData[currentJson]["name"] + "\n" + helpSecToString(start) + " - " + helpSecToString(end),
+        text=str(len(sections) + 1) + " - " + jsonData[currentJson]["name"] + "\n" + helpSecToString(start) + " - " + helpSecToString(end),
         command=lambda index=len(sections): sectionSelect(index)
     )
     sectionButton.configure(fg_color = brightColors[colorID], hover = False)                #note: ogIndex does not seem to do anything yet
@@ -639,9 +951,20 @@ def sectionCreate(isEmpty):
 
     sectionSelect(len(sections) - 1) #Note: Len makes a list of 1 object have a len value of 1
     currentJson = tempCurrentJson
-    tracksRedraw(scroll=True)
 
-    print(f"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA {len(sections)}")
+    global outputUseCache
+    outputUseCache = False
+
+    # "Select" the newly created section, handle internally which viewer is open
+    print(f"gonna select {len(sections) - 1}")
+    sectionSelect(len(sections) - 1) #Note: Len makes a list of 1 object have a len value of 1
+
+    #Redundant with sectionSelect
+''' tracksRedraw()
+    viewerBuildOutput()
+    viewerRenderAgnostic(scroll=True)'''
+
+    #print(f"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA {len(sections)}")
 
     #print(f"CHATLOG PLAYHEAD {chatlogPlayheadValue}")
 
@@ -656,76 +979,96 @@ def sectionCreateEmpty():
     sectionCreate(True)
 
 def sectionSelect(index):
-    global currentSection, currentJson, viewerSection #Change 11/12/26: Removed viewerJson
+    global currentSection, currentJson, viewerSection
+    global outputUseCache, outputJumppoint
 
     print(f"index is {index}")
 
     # == UPDATE CURRENT SECTION ==
     # Update currentSection. if index starts at 0, len of sectionList should be 1
+    # ALSO updates viewerSection
     if -1 < index < len(sections):
         currentSection = index
         viewerSection = index
+        sectionHighlight()
+    else:
+        sectionHighlight()
+        tracksRedraw()
+        viewerRenderAgnostic(scrollTo="top")
+        return
+
+    print(f"len(sections) is {len(sections)}")
 
     # == UPDATE CURRENT JSON ==
     #selected section might be on a different chatlog
     #update timeline to reflect this
     jsonIndex = sections[index]["jsonIndex"]
     if(currentJson != jsonIndex):
-        print(f"currentJson: {currentJson}")
-        print(f"jsonIndex: {jsonIndex}")
+        rangeManagement(jsonIndex)
+        #(f"currentJson: {currentJson}")
+        #print(f"jsonIndex: {jsonIndex}")
         currentJson = jsonIndex
+        jsonHighlight()
+        rangeSourceTitle.configure(text="Current Source: " + jsonData[currentJson]["name"])
 
     # == UPDATE TIMELINE, WHICH UPDATES VIEWER ==
-    tracksRedraw(scroll=True)
+    tracksRedraw()
+    outputUseCache = False
+    outputJumppoint = "section" # next switch to output will emphasize "section"
+    #viewerBuildOutput()
+    viewerRenderAgnostic(scroll=True, scrollTo="section")
 
 def sectionSwap(index1, index2):
-    global sections
+    global sections, outputUseCache, viewerSection, currentSection
+    outputUseCache = False
+
+    # Swap button commands and grid positions
     sections[index1]["button"].configure(command=lambda index=index2: sectionSelect(index)) #swapping lamda commands
     sections[index2]["button"].configure(command=lambda index=index1: sectionSelect(index))
     sections[index1]["button"].grid(row=index2 + 1) #swapping location in sectionEditor
     sections[index2]["button"].grid(row=index1 + 1) #+1 to account for title label
+
+    # Swap list elements
     sections[index1], sections[index2] = sections[index2], sections[index1] #swapping sectionList elements using tuple unpacking
+
+    currentSection = index2
+    viewerSection = index2
+    sectionHighlight()
+    tracksRedraw()
+    viewerRenderAgnostic(scrollTo="section")
     return
 
 def sectionDelete(index):
-    global sections, currentSection, viewerSection
-    if not 0 <= index < len(sections):
+    global sections, currentSection, viewerSection, outputUseCache
+    if not sections or not (0 <= index < len(sections)):
         return
 
-    deleted = sections.pop(index)
-    button = deleted["button"]
+    sections[index]["button"].destroy() # eliminate section visual
+    sections.pop(index)              # eliminate section data
 
-    if button.winfo_exists():
-        button.destroy()
-
-    # Reindex and lay out the surviving buttons directly. Avoid swapping through
-    # a widget that may already have been destroyed.
     for i, section in enumerate(sections):
-        button = section["button"]
-        try:
-            if not button.winfo_exists():
-                continue
-            button.configure(command=lambda index=i: sectionSelect(index))
-            button.grid(row=i + 1)
-        except tkinter.TclError:
-            continue
+        section["button"].configure(command=lambda target=i: sectionSelect(target))
+        section["button"].grid(row=i + 1)
 
-    if sections:
-        currentSection = min(index, len(sections) - 1)
-        viewerSection = currentSection
-    else:
+    if not sections:
         currentSection = 0
         viewerSection = -1
-    tracksRedraw(keep=True)
-    return
+        sectionHighlight()
+        tracksRedraw()
+        viewerRenderAgnostic(scrollTo="top")
+    else:
+        currentSection = min(index, len(sections) - 1)
+        viewerSection = currentSection
+        sectionSelect(currentSection)
 
 # Ensures section colors aren't repeated in sequence.
 def sectionGenColor():
-    global lastColor
+    global lastColors
     colorID = random.randint(0, 7)
-    while brightColors[colorID] == lastColor:
+    while brightColors[colorID] in lastColors:
         colorID = random.randint(0, 7)
-    lastColor = brightColors[colorID]
+    lastColors.pop(0)
+    lastColors.append(brightColors[colorID])
     return colorID
 
 # Checks whether the section timestamps make sense, and updates the end accordingly.
@@ -734,11 +1077,11 @@ def sectionValidEnds(start, end, maxEnd):
     if(maxEnd) <= 0 or (start >= maxEnd):
         messagebox.showwarning("Invalid Section", "Specified time can only create section of zero seconds, please try again.")
         return 0
-    if(end > maxEnd):
-        messagebox.showwarning("Section Warning", "Specified time longer than chatlog.\n\nSetting end to maximum length.")
-        return maxEnd
     if start > end or start < 0 or end < 0:
         messagebox.showwarning("Section Warning", "Please make sure your start is not before your end.\n\nSetting end to maximum length.")
+        return maxEnd
+    elif(end > maxEnd):
+        messagebox.showwarning("Section Warning", "Specified time longer than chatlog.\n\nSetting end to maximum length.")
         return maxEnd
     elif start == end:
         messagebox.showwarning("Section Warning", "Section is zero seconds long!\n\nSetting end to maximum length.")
@@ -856,7 +1199,7 @@ def tempWriteID(vod_url):
 # Pokes around the esoteric Chat-Downloader backend to try and get
 # things like game data and streamer name for the Chatlog labels.
 # Returns a dictionary for the label.
-def importsQueryVOD(vod_chat, first_message):
+def importQueryVOD(vod_chat, first_message):
 
     # Run query for metadata.
     vod_query = [{'operationName': 'VideoMetadata', 'variables': {'channelLogin': '', 'videoID': vod_chat.id}}]
@@ -887,7 +1230,7 @@ def importsQueryVOD(vod_chat, first_message):
 # If those can't be found, handle it accordingly.
 # Return dictionary for the label. Return comments in dictionary as well
 # in order to account for malformed "list" style chatlog JSONs with only chat.
-def importsQueryJSON(imported_data, json_comments = []):
+def importQueryJSON(imported_data, json_comments = []):
 
     # Handling weird formatting in some JSON files.
     if type(imported_data) == list:
@@ -1073,8 +1416,8 @@ def rangeSliderDragged(sliderValue, side):
 
     #rangeSliderValues = (sliderMin, sliderMax)
     
-# Makes sure that updates to the entry boxes
-# update the positions of the sectioner range handles
+# Entry boxes: make sure they update the
+# the positions of the sectioner range handles
 def rangeUpdateHandles(event=None):
     # Leave if there is no selected JSON.
     if currentJson == -1:
@@ -1119,13 +1462,13 @@ def rangeUpdateHandles(event=None):
 # Section timeline slider functions
 # Update title string.
 def tracksUpdateTitles():
-    timelines.itemconfig(timelinesChatlogTitle, text=str(f"Current Source: {chatlogPlayheadValue} Seconds"))
-    timelines.itemconfig(timelinesOutputTitle, text=str(f"Full Sections Output: {outputPlayheadValue} Seconds"))  
+    timelines.itemconfig(timelinesChatlogTitle, text=str(f"Current Source: {int(chatlogPlayheadValue)} Seconds"))
+    timelines.itemconfig(timelinesOutputTitle, text=str(f"Full Sections Output: {int(outputPlayheadValue)} Seconds"))  
 
 # Update both timeline playhead lines and number values.
 def tracksRefreshPlayheads():
-    print(f"TRP: current json is {currentJson}")
-    print(f"TRP: jsonData len is {len(jsonData)}")
+    #print(f"TRP: current json is {currentJson}")
+    #print(f"TRP: jsonData len is {len(jsonData)}")
     tracksUpdatePlayhead(timelinesChatlogSlider, chatlogPlayheadLine, jsonLine, chatlogPlayheadText, 
                            (jsonData[currentJson].get('endTime', 0) if currentJson != -1 else 0))
     tracksUpdatePlayhead(timelinesOutputSlider, outputPlayheadLine, yttLine, outputPlayheadText, getYTTDuration())
@@ -1173,7 +1516,7 @@ def viewerScroll(timelineSeconds):
     # Remove highlight from last highlighted message.
     viewer.tag_remove("active_highlight", "1.0", "end")
     
-    # Cap to last possible chat message in visualizer
+    # Jump to last possible chat message in visualizer
     if target_index >= len(viewerTimes):
         viewer.yview("end")
     else:
@@ -1202,31 +1545,25 @@ def viewerScroll(timelineSeconds):
 def viewerModeSelect(mode):
     global editedOnly, viewerTimes, lastChatlogMode
 
-    # Record mode as last selected:
-    lastChatlogMode = mode
-
     # Preview uninterrupted original chatlog
     if mode == "Source Preview":
+        lastChatlogMode = mode # Record mode as last selected:
         editedOnly = False
-        viewerRender(keep=True)
+        viewerRenderSource(keep=True)
         viewerScroll(chatlogPlayheadValue)
 
     # Preview only current chatlog's sections
     elif mode == "Source's Sections Only":
+        lastChatlogMode = mode # Record mode as last selected:
         editedOnly = True
-        viewerRender(keep=True)
+        viewerRenderSource(keep=True)
         viewerScroll(chatlogPlayheadValue)
 
     # Preview output
     elif mode == "Full Sections Output":
-        #TODO
-        # print("Output display not done yet")
-        viewerTimes = outputTimes
-        viewerRenderOutput(keep=False)
+        viewerRenderOutput(scrollTo=outputJumppoint)
         viewerScroll(outputPlayheadValue)
-        return
     
-        
 # Render the current chat row into "small caps" format
 # using funny unicode characters
 # can't really be covered by simple font changes
@@ -1242,7 +1579,7 @@ def viewerSmallCapsPass(text):
 # Goes to the viewer object and changes its font
 # based on what is chosen in settings
 def viewerUpdateFont(font):
-    global settingsSmallCaps, viewerTimes
+    global settingsSmallCaps, viewerTimes, outputUseCache
 
     if fontPreview.get() == 1:
         if(font == "Small Caps"):
@@ -1271,6 +1608,7 @@ def viewerUpdateFont(font):
         family, size = fontDict.get(font, fontDict["Defaults"])
         viewerFont.configure(family=family, size=size)
 
+        outputUseCache = False
         viewerBuildOutput() #need to rebuild the output to force small caps on/off
 
         if(viewerModeButtons.get() == "Full Sections Output"):
@@ -1278,7 +1616,7 @@ def viewerUpdateFont(font):
             viewerRenderOutput()
             viewerScroll(outputPlayheadValue)
         else:
-            viewerRender()
+            viewerRenderSource()
             viewerScroll(chatlogPlayheadValue)
     
 
@@ -1287,14 +1625,15 @@ def viewerUpdateFont(font):
 # such as resetting the font to Courier New,
 # or switching to the just-selected font
 def viewerFontReset():
-    global settingsSmallCaps, viewerTimes
+    global settingsSmallCaps, viewerTimes, outputUseCache
     # If set OFF, then reset visualizer to default font.
     if fontPreview.get() == 0:
         #print("TURN OFF FONTS")
         viewerFont.configure(family="Courier New", size=11)
         settingsSmallCaps = False
 
-        viewerBuildOutput() #need to rebuild the output to force small caps on/off
+        outputUseCache = False
+        #viewerBuildOutput() #need to rebuild the output to force small caps on/off
 
         # ONLY FOR IF SWITCHED OFF, clone of this in UpdateViewerFont
         # Rebuild the correct viewer based on active mode
@@ -1303,62 +1642,18 @@ def viewerFontReset():
             viewerRenderOutput()
             viewerScroll(outputPlayheadValue)
         else:
-            viewerRender()
+            viewerRenderSource()
             viewerScroll(chatlogPlayheadValue)
 
     else:
         viewerUpdateFont(fontOption.get())
 
 #--------------------------------------------------------------------------
-# Output preview related functions
-def viewerBuildOutput():
-    global outputTimes, outputRows, outputRanges, outputStampWidth #outputCache
-    starts = getSectionStarts() # Get list of starts
-    outputCache = []            # Reset output cache
-    outputTimes = []            # Reset output times
-    rows = []                   # Init rows
-    
-    for i, section in enumerate(sections):
-        messages = viewerLoadMessages(section["jsonIndex"])
-        if not messages:
-            continue
 
-        header_t = starts[i]
-        header_name = f"===== SECTION {i + 1}"
-        header_color = "#FFFFFF"
-        header_body = f"START ====="
-        
-        #outputCache.append((header_t, header_name, header_color, header_body))
-        outputTimes.append(float(header_t))
-        rows.append((helpSecToString(int(header_t)), header_name, header_color, header_body, f"sec{i}"))
-        
-        sectStart = section["start"] #wait, isn't this redundant...?
-        sectEnd = section["end"]
-        
-        # Fast bisect slicing to find endpoints of sections
-        # instead of parsing every message directly
-        # O(N) -> O(log N)
-        left_idx = bisect.bisect_left(messages, (sectStart,))
-        right_idx = bisect.bisect_right(messages, (sectEnd,))
-        time_offset = starts[i] - sectStart
-        
-        for msg in messages[left_idx:right_idx]:
-            t, name, body, color = msg
-            name = viewerSmallCapsPass(name)
-            body = viewerSmallCapsPass(body)
-            shifted_t = t + time_offset
-            #outputCache.append((shifted_t, name, color, body))
-            outputTimes.append(int(shifted_t))
-            rows.append((helpSecToString(int(shifted_t)), name, color, body, f"sec{i}")) #tags each message with corresponding section index
-        
-    if not rows:
-        rows = [("", "", "#bbbbbb", "No sections in output timeline.", "out")]
-        
-    outputRows, outputRanges, outputStampWidth = viewerBuildText(rows)
-
-def tracksUpdateChatlogSlider():
+def tracksChatlogDragged():
     global chatlogPlayheadValue
 
+    #Reassign chatlogPlayheadValue for the sake of updating the playhead objects.
     endTime = jsonData[currentJson].get('endTime', 0) if currentJson != -1 else 0
     chatlogPlayheadValue = tracksUpdatePlayhead(timelinesChatlogSlider, chatlogPlayheadLine, jsonLine, chatlogPlayheadText, endTime)
 
@@ -1367,17 +1662,21 @@ def tracksUpdateChatlogSlider():
 
     # Return to last used non-output chatlog viewer.
     if viewerModeButtons.get() == "Full Sections Output":
+        #print(lastChatlogMode)
         viewerModeButtons.set(lastChatlogMode)
         viewerModeSelect(lastChatlogMode)
 
-   # If messages exist, scroll to playhead value. Should match chatlog slider at this point.
+    # If ANY messages exist IN THE VIEWER, 
+    # scroll to playhead value. Should match chatlog slider at this point.
     if viewerTimes:
         viewerScroll(chatlogPlayheadValue)
 
-def tracksUpdateOutputSlider():
-    global outputPlayheadValue
+def tracksOutputDragged():
+    global outputPlayheadValue, outputJumppoint
 
+    #Reassign outputPlayheadValue for the sake of updating the playhead objects.
     outputPlayheadValue = tracksUpdatePlayhead(timelinesOutputSlider, outputPlayheadLine, yttLine, outputPlayheadText, getYTTDuration())
+    outputJumppoint = "playhead" # switching modes will emphasize playhead
 
     # Update timeline titles.
     tracksUpdateTitles()
@@ -1385,7 +1684,9 @@ def tracksUpdateOutputSlider():
     if viewerModeButtons.get() != "Full Sections Output":
         viewerModeButtons.set("Full Sections Output")
         viewerModeSelect("Full Sections Output")
-        
+
+    # If ANY messages exist IN THE VIEWER, 
+    # scroll to playhead value. Should match output slider at this point.
     if viewerTimes:
         viewerScroll(outputPlayheadValue)
 
@@ -1522,8 +1823,8 @@ rangeTitle = customtkinter.CTkLabel(master = rangeBox, text="Create Subtitle Sec
 rangeTitle.grid(row=0, column=0, padx=0, pady=(5, 0), sticky="nsew")
 rangeTitle.configure(font = ("Roboto", 15))
 
-rangeCurrChatlog = customtkinter.CTkLabel(master = rangeBox, text="No Chatlog Selected")
-rangeCurrChatlog.grid(row=1, column=0, padx=1, pady=(5, 1), sticky="ew")
+rangeSourceTitle = customtkinter.CTkLabel(master = rangeBox, text="No Chatlog Selected")
+rangeSourceTitle.grid(row=1, column=0, padx=1, pady=(5, 1), sticky="ew")
 
 timeEntry = customtkinter.CTkFrame(master=rangeBox)
 timeEntry.grid(row=2, column=0, padx=1, pady=1, sticky="n")
@@ -1632,6 +1933,19 @@ viewerScrollbar = customtkinter.CTkScrollbar(master=viewerFrame, orientation="ve
 viewerScrollbar.grid(row=1, column=1, padx=(0, 5), pady=(0, 5), sticky="ns")
 viewer.configure(yscrollcommand=viewerScrollbar.set)
 
+# Define tag definitions. Short for optimization reasons?
+# Tag for time in seconds.
+viewer.tag_config("timestamp", foreground="#6fa8dc", font=viewerTimeFont)
+# Tag for messages outside of any section.
+viewer.tag_config("out", foreground="#8a8a8a")
+# Tag for messages long enough to be hanging.
+viewer.tag_config("hang", lmargin2=viewerFont.measure("0") * (outputStampWidth + 2))
+# Tag for section start labels.
+viewer.tag_config("st")
+# Tag for highlighted messages under scroll
+viewer.tag_config("active_highlight", background="#0a0a0a")
+viewer.tag_config("header", foreground="#ffffff", font=viewerTimeFont)
+
 #--------------------------------------------------------------------------
 #Timelines. Where the currently selected JSON's timeline is displayed, and where the total YTT section view is displayed.
 timelines = tkinter.Canvas(
@@ -1675,11 +1989,11 @@ timelines.tag_raise(outputPlayheadLine)
 
 # Timeline Titles
 timelinesChatlogTitle = timelines.create_text(500, jsonLine - 55,
-    text=f"Current Source: {chatlogPlayheadValue}", 
+    text=f"Current Source: {int(chatlogPlayheadValue)}", 
     fill="white", font=("Roboto", 13), anchor="center")
 
 timelinesOutputTitle = timelines.create_text(500, yttLine - 55,
-    text=f"Full Sections Output: {outputPlayheadValue}",
+    text=f"Full Sections Output: {int(outputPlayheadValue)}",
     fill="white", font=("Roboto", 13), anchor="center")
 
 # Slider object for the chatlog timeline.
@@ -1687,7 +2001,7 @@ timelinesChatlogSlider = customtkinter.CTkSlider(
     master=timelines, from_=0, to=100, width=916,
     fg_color = "#202020",
     bg_color="transparent", progress_color="transparent",
-    command=lambda val: tracksUpdateChatlogSlider())
+    command=lambda val: tracksChatlogDragged())
 
 timelinesChatlogSlider.place(x=43, y=102), timelinesChatlogSlider.set(0)
 
@@ -1697,15 +2011,16 @@ timelinesOutputSlider = customtkinter.CTkSlider(
     fg_color = "#202020",
     bg_color="transparent", progress_color="transparent",
     button_color="#2b7a3d", button_hover_color="#1e5c2d",
-    command=lambda val: tracksUpdateOutputSlider()
+    command=lambda val: tracksOutputDragged()
 )
 timelinesOutputSlider.place(x=43, y=252), timelinesOutputSlider.set(0)
 
 #--------------------------------------------------------------------------
 # Timeline Management
 
-def tracksRedraw(keep=False, scroll=False):
-    global viewerTimes, outputTimes
+def tracksRedraw():
+    global viewerTimes, outputTimes, outputUseCache
+    outputUseCache = False
     timelines.delete("sections")
 
     duration = getYTTDuration()
@@ -1713,7 +2028,7 @@ def tracksRedraw(keep=False, scroll=False):
     timelineLength = timelineMaxx - timelineMinx
 
     # Rebuild output cache whenever sections change
-    viewerBuildOutput()
+    #viewerBuildOutput()
 
     if(duration > 0):
         #print(f"AAAGHHGH {duration}")
@@ -1747,50 +2062,20 @@ def tracksRedraw(keep=False, scroll=False):
     # Update displayed time.
     sectionTotalTime.configure(text=f"Total Time: {helpSecToString(getYTTDuration())}")
 
-    if viewerModeButtons.get() == "Full Sections Output":
+'''    if viewerModeButtons.get() == "Full Sections Output":
         viewerTimes = outputTimes
-        viewerRenderOutput(keep=keep) # Refresh viewer if currently in output mode
+        viewerRenderOutput(keep=keep, scroll=scroll) # Refresh viewer if currently in output mode
     else:
-        print(f"tracksRedraw scroll = {scroll}")
-        viewerRender(keep=keep, scroll=scroll)  #Refresh the viewer whenever sections are created, deleted or reordered.
+        #print(f"tracksRedraw scroll = {scroll}")
+        viewerRenderSource(keep=keep, scroll=scroll)  #Refresh the viewer whenever sections are created, deleted or reordered.'''
 
-def viewerRenderOutput(keep=False):
-    previous = viewer.yview()[0]
-    viewer.configure(state="normal")
-    viewer.delete("1.0", "end")
-    viewer.tag_config("ts", foreground="#6fa8dc", font=viewerTimeFont)
-    viewer.tag_config("out", foreground="#8a8a8a")
-    viewer.tag_config("hang", lmargin2=viewerFont.measure("0") * (outputStampWidth + 2))
+def viewerRenderAgnostic(keep=False, scroll=True, scrollTo="top"):
+    if viewerModeButtons.get() == "Full Sections Output":
+        viewerRenderOutput(scrollTo=scrollTo) # Refresh viewer if currently in output mode
+    else:
+        #print(f"tracksRedraw scroll = {scroll}")
+        viewerRenderSource(keep=keep, scroll=scroll)  #Refresh the viewer whenever sections are created, deleted or reordered.
 
-    for position, section in enumerate(sections):
-        viewer.tag_config("sec" + str(position), background=section["darkerColor"], foreground="#ffffff")
-    
-    viewer.insert("1.0", outputRows)
-    viewer.tag_add("hang", "1.0", "end")
-    
-    for tag, spans in outputRanges.items():
-        if tag.startswith("nm"):
-            viewer.tag_config(tag, foreground="#" + tag[2:])
-            viewer.tag_raise(tag)
-        indexes = []
-        for line, startColumn, endColumn in spans:
-            indexes.append(f"{line}.{startColumn}")
-            if endColumn is None:
-                indexes.append(f"{line + 1}.0")
-            else:
-                indexes.append(f"{line}.{endColumn}")
-        for i in range(0, len(indexes), 2000):
-            viewer.tag_add(tag, *indexes[i:i + 2000])
-    viewer.tag_raise("ts")
-
-    viewer.tag_config("active_highlight", background="#0a0a0a")
-    for tag in outputRanges:
-        if tag.startswith("nm"):
-            viewer.tag_raise(tag)
-            viewer.tag_raise("active_highlight")
-
-    viewer.configure(state="disabled")
-    viewer.yview_moveto(previous if keep else 0)
 
 #Things to do when the app starts
 importEmptyJSON()
@@ -1798,22 +2083,17 @@ importEmptyJSON()
 #--------------------------------------------------------------------------
 # Keyboard Input
 def KeyPress(event): #No switch statement cus I don't want to mess with python versions
-    global currentSection
+    global currentSection, viewerSection
     if event.keysym == "Up":
         if currentSection > 0:
             sectionSwap(currentSection, currentSection - 1)
-            currentSection = currentSection - 1
-            tracksRedraw(keep=True)
     elif event.keysym == "Down":
         if currentSection < len(sections) - 1:
             sectionSwap(currentSection, currentSection + 1)
-            currentSection = currentSection + 1
-            tracksRedraw(keep=True)
     elif event.keysym == "Delete":
-        if isinstance(app.focus_get(), customtkinter.CTkEntry):
-            return  # Let the entry handle Delete normally
-        else:
-            sectionDelete(currentSection)
+        if not isinstance(app.focus_get(), customtkinter.CTkEntry):
+            sectionDelete(currentSection)  # Let the entry handle Delete normally
+            
 app.bind("<KeyPress>", KeyPress)
 
 # Entry box keybinds:
