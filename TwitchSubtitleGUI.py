@@ -9,6 +9,7 @@ import re #Used to identify chatter name colors from the json
 import tkinter.font as tkfont #Monospace font for the chatlog viewer.
 import bisect
 import random
+import copy
 import threading # important for downloading
 from datetime import datetime, timedelta # importing time and date to get downloaded vod dates from first message.
 import yttconverter
@@ -16,6 +17,7 @@ import chat_downloader
 from chat_downloader import ChatDownloader
 from tkinter import filedialog, messagebox
 from pathlib import Path
+from dataclasses import dataclass
 
 #--------------------------------------------------------------------------
 # Exceptions
@@ -35,7 +37,7 @@ customtkinter.set_default_color_theme("dark-blue")
 app = customtkinter.CTk()  # creates the window
 app.geometry("1000x800")
 app.resizable(False, False) #The timelines sorta break if the window is resizable.
-app.title("I Played Tony Hawk's Ride Once and It Sucked")
+app.title("Green Squirrel In Pretty Bad Shape")
 app.focus_force()
 
 # Colors
@@ -54,6 +56,7 @@ lastColors = ["#000000", "#000000", "#000000", "#000000"] # Ensures that the las
 # Source management global variables
 jsonData = []      # List of dictionaries for full chatlogs. "path", "name", "endTime"
 currentJson = -1   # The index of the current JSON in jsonData
+emptyJsonPath = Path("./Assets/Empty.json")
 
 # Section management global variables
 sections = []   # List of dictionaries. "jsonIndex", "start", "end", "button", "ogIndex", "color", "darkerColor"
@@ -101,10 +104,11 @@ def importFileJSON():
     jsonCard = customtkinter.CTkButton(
         master=jsonShelf,
         text="Importing...",
-        state="disabled",   # Prevent clicking while loading
+        state="disabled",  # Prevent clicking while loading
         fg_color="#374c64"  # Greyer color for loading state
     )
-    jsonCard.grid(row=len(jsonData)+1, column=0, padx=5, pady=2, sticky="ew")
+    jsonCard.grid(row=len(jsonData) + 1, column=0, padx=5, pady=2, sticky="ew")
+
 
     # Prompt user for JSON.
     filePath = filedialog.askopenfilename(
@@ -126,6 +130,7 @@ def importFileJSON():
         app.after(0, jsonCard.destroy)
         return
 
+
     # Take stream info metadata to create chatlog label.
     json_metadata = importQueryJSON(imported_data)
 
@@ -135,7 +140,7 @@ def importFileJSON():
 
     # Warn the user if the chatlog is devoid of comments, but let them use it if they want to for some ungodly reason.
     if json_metadata.get('comments') == []:
-        json_label += "\nWARNING: EMPTY"
+        json_label += ", WARNING: EMPTY"
         app.after(0, lambda: messagebox.showwarning("Import Warning", f"No messages found for this file."))
 
     # If some data is missing, fallback to filename.
@@ -144,7 +149,7 @@ def importFileJSON():
 
     # Attach this JSON to the chain of chatlog information.
     jsonData.append({"path":filePath, "name":json_label, "endTime":duration, "button": jsonCard})
-    if len(jsonData) >= 1:
+    if len(jsonData) >= 2:
         #print(len(jsonData) - 1)
         jsonSelect(len(jsonData) - 1)
 
@@ -153,15 +158,16 @@ def importFileJSON():
         # filepath, vod label, length, comments 
         # "comments" as list of dicts, containing commenter, messages, and content_offset_seconds
     jsonCard.configure(
-        text=str(len(jsonData)) 
-        + " - " + jsonData[-1]["name"] 
+        text=str(len(jsonData)-1)
+        + " - " + jsonData[-1]["name"]
         + "\nDuration: "
-        + "(" 
+        + "("
         + str(timedelta(seconds=duration)) + ")",
-        state="normal", anchor="w",
+        state="normal",
         fg_color="#1f538d", hover_color="#14375e",
         command=lambda index=len(jsonData) - 1: jsonSelect(index)
     )
+
 
     # Refresh viewer contents 
     if lastChatlogMode == "Full Sections Output":
@@ -175,10 +181,10 @@ def importFileJSON():
     # And should be, by definition, blank.
     tracksRedraw()
     outputUseCache = False
-    #viewerBuildOutput()
-    viewerRenderAgnostic()
-    #print(f"ok json current is {currentJson}")
 
+    # viewerBuildOutput()
+    viewerRenderAgnostic()
+    # print(f"ok json current is {currentJson}")
 
 # This works now. Make sure to build with
 # this specific build of chat-downloader.
@@ -466,8 +472,8 @@ def viewerBuildText(rows):
     
     for row, (stamp, name, color, body, tag) in enumerate(rows, start=1): # iterate across rows, start at 1
         head = stamp.ljust(stampWidth) + "  "
-        label = name + ":"
-        content = label + " " + body
+        label = (name + ":") if name else ""
+        content = (label + " " + body) if label else body
         is_header = name.startswith("=====")
         if not is_header:
             content = viewerSmallCapsPass(content)
@@ -486,6 +492,78 @@ def viewerBuildText(rows):
 
     # Concatenate every line with \n, return as (all rows, ranges, widths)
     return "\n".join(lines), ranges, stampWidth
+
+
+# Output preview related functions
+def viewerBuildOutput():
+    global outputText, outputRanges, outputStampWidth
+    global outputTimes, outputUseCache
+
+    print(f"len of sections is {len(sections)}")
+    
+    if outputUseCache:
+        return # Don't update output cache variables
+    
+    starts = getSectionStarts() # Get list of starts
+    outputTimes = []            # Reset output times
+    #outputFirstRows = {}        # Reset dict of each section's first row index
+    rows = []                   # Init rows
+    
+    for i, section in enumerate(sections):
+        messages = viewerLoadMessages(section["jsonIndex"])
+        sectionType = "SECTION" if messages else "SPACER"
+
+        # Add visual indicator of sections moved around
+        ogIndex = (section.get("ogIndex", -1) + 1)
+        shiftedIndication = ""
+        if (i) != ogIndex:
+            shiftedIndication = f"({ogIndex + 1})"
+
+        # Add section 
+        header_t = starts[i]
+        header_name = f"====== {sectionType} {i + 1}{shiftedIndication}"
+        header_color = "#FFFFFF"
+        header_body = f"START ======"
+        
+        #outputCache.append((header_t, header_name, header_color, header_body))
+        outputTimes.append(float(header_t))
+        rows.append((helpSecToString(int(header_t)), header_name, header_color, header_body, f"sec{i}"))
+
+        if sectionType == "SPACER":
+            outputTimes.append(float(header_t))
+            rows.append(("", "", "#FFFFFF", "...", f"sec{i}"))
+            #header_body += "\n" + text.rjust(outputStampWidth) + "\n"
+        
+        sectStart = section["start"] #wait, isn't this redundant...?
+        sectEnd = section["end"]
+        
+        # Fast bisect slicing to find endpoints of sections
+        # instead of parsing every message directly
+        # O(N) -> O(log N)
+        left_idx = bisect.bisect_left(messages, (sectStart,))
+        right_idx = bisect.bisect_right(messages, (sectEnd,))
+        time_offset = starts[i] - sectStart
+        
+        for msg in messages[left_idx:right_idx]:
+            t, name, body, color = msg
+            #name = name
+            #body = body
+            shifted_t = t + time_offset
+            #outputCache.append((shifted_t, name, color, body))
+            outputTimes.append(int(shifted_t))
+            rows.append((helpSecToString(int(shifted_t)), name, color, body, f"sec{i}")) #tags each message with corresponding section index
+        
+    if not rows:
+        rows = [("", "", "#bbbbbb", "No sections in output timeline.", "out")]
+
+    # Update output global variables
+    outputText, outputRanges, outputStampWidth = viewerBuildText(rows)
+
+    # Next time, use this cache unless otherwise stated.
+    #print(f"[{outputText}]")
+    if outputText != "  : No sections in output timeline.":
+        print("yay")
+        outputUseCache = True
 
 def viewerRender(keep=False, scroll=False, scrollTo="top", mode="source"):
     # Tag meanings:
@@ -521,7 +599,6 @@ def viewerRender(keep=False, scroll=False, scrollTo="top", mode="source"):
         if currentJson < 0 or currentJson >= len(jsonData): # Give up if currentJson has invalid index
             return
 
-
 #Redraws the viewer from currentJson / viewerSection / editedOnly.
 #scroll=True jumps to the selected section. keep=True stays at the current scroll position.
 def viewerRenderSource(scroll=False, keep=False, scrollTo="top"):
@@ -546,7 +623,6 @@ def viewerRenderSource(scroll=False, keep=False, scrollTo="top"):
     # Give up if currentJson has invalid index
     if currentJson < 0 or currentJson >= len(jsonData):
         return
-
     # Reset "viewerSection" global if invalid
     if ((viewerSection < 0 or viewerSection >= len(sections)) # is viewerSection out of bounds?
         or (sections[viewerSection]["jsonIndex"] != currentJson)): # pointing to a different section?
@@ -572,6 +648,7 @@ def viewerRenderSource(scroll=False, keep=False, scrollTo="top"):
     # == START RENDER ==
     viewer.configure(state="normal") # enable editing to change the text
     viewer.delete("1.0", "end") # DELETES THE ENTIRE VIEWER'S CONTENTS LOL
+    viewer.tag_config("hang", lmargin2=viewerFont.measure("0") * (stampWidth + 2)) #this needs to update
 
     for sectionListIndex, section in filteredSections:
         viewer.tag_config("sec" + str(sectionListIndex), background=section["darkerColor"], foreground="#ffffff")
@@ -648,6 +725,7 @@ def viewerRenderOutput(scrollTo="top"):
     # Edit prep
     viewer.configure(state="normal") # enable editing to change the text
     viewer.delete("1.0", "end") # DELETES THE ENTIRE VIEWER'S CONTENTS LOL
+    viewer.tag_config("hang", lmargin2=viewerFont.measure("0") * (outputStampWidth + 2)) #this needs to update
 
     # Position for section number, section as corresponding dictionary itself
     for sectionListIndex, section in enumerate(sections):
@@ -699,73 +777,6 @@ def viewerRenderOutput(scrollTo="top"):
     else:
         # ???
         return
-
-# Output preview related functions
-def viewerBuildOutput():
-    global outputText, outputRanges, outputStampWidth
-    global outputTimes, outputUseCache
-
-    print(f"len of sections is {len(sections)}")
-    
-    if outputUseCache:
-        return # Don't update output cache variables
-    
-    starts = getSectionStarts() # Get list of starts
-    outputTimes = []            # Reset output times
-    #outputFirstRows = {}        # Reset dict of each section's first row index
-    rows = []                   # Init rows
-    
-    for i, section in enumerate(sections):
-        messages = viewerLoadMessages(section["jsonIndex"])
-        if not messages:
-            continue
-
-        # Add visual indicator of sections moved around
-        ogIndex = (section.get("ogIndex", -1) + 1)
-        shiftedIndication = ""
-        if (i) != ogIndex:
-            shiftedIndication = f"({ogIndex + 1})"
-
-        # Add section 
-        header_t = starts[i]
-        header_name = f"====== SECTION {i + 1}{shiftedIndication}"
-        header_color = "#FFFFFF"
-        header_body = f"START ======"
-        
-        #outputCache.append((header_t, header_name, header_color, header_body))
-        outputTimes.append(float(header_t))
-        rows.append((helpSecToString(int(header_t)), header_name, header_color, header_body, f"sec{i}"))
-        
-        sectStart = section["start"] #wait, isn't this redundant...?
-        sectEnd = section["end"]
-        
-        # Fast bisect slicing to find endpoints of sections
-        # instead of parsing every message directly
-        # O(N) -> O(log N)
-        left_idx = bisect.bisect_left(messages, (sectStart,))
-        right_idx = bisect.bisect_right(messages, (sectEnd,))
-        time_offset = starts[i] - sectStart
-        
-        for msg in messages[left_idx:right_idx]:
-            t, name, body, color = msg
-            #name = name
-            #body = body
-            shifted_t = t + time_offset
-            #outputCache.append((shifted_t, name, color, body))
-            outputTimes.append(int(shifted_t))
-            rows.append((helpSecToString(int(shifted_t)), name, color, body, f"sec{i}")) #tags each message with corresponding section index
-        
-    if not rows:
-        rows = [("", "", "#bbbbbb", "No sections in output timeline.", "out")]
-
-    # Update output global variables
-    outputText, outputRanges, outputStampWidth = viewerBuildText(rows)
-
-    # Next time, use this cache unless otherwise stated.
-    #print(f"[{outputText}]")
-    if outputText != "  : No sections in output timeline.":
-        print("yay")
-        outputUseCache = True
 
 def rangeStore(rangeSlider, index):
     values = rangeSlider.get() or [0, 100] #default to [0, 100] if range isn't stored
@@ -829,6 +840,8 @@ def rangeManagement(index):
 
 def jsonHighlight():
     for i, entry in enumerate(jsonData):
+        if entry.get("button") is None: #skip the invisible spacer entry
+            continue
         if i == currentJson:
             entry["button"].configure(border_width=3, border_color="#ff8181")
         else:
@@ -837,32 +850,28 @@ def jsonHighlight():
 #Change 11/8/26: SelectJson now also tells the viewer which chatlog to show.
 #Renamed to jsonSelect
 def jsonSelect(index):
-    # TODO write current range slider handles to tuples and assign to dict with currentJson as key before reassignment
     global currentJson, viewerSection
-
+    # Take current range slider handles to tuples and assign to dict with currentJson as key before reassignment
     rangeManagement(index)
+
+    # Assign new current JSON
     currentJson = index
     jsonHighlight()
 
+    # Implode the currently viewed section information
     viewerSection = -1 
     viewerRenderSource() #Draw it.
     if lastChatlogMode == "Full Sections Output":
         viewerScroll(outputPlayheadValue)
     else:
         viewerScroll(chatlogPlayheadValue)
-    rangeSourceTitle.configure(
-        text="Current Source: " + jsonData[currentJson]["name"]
-    )
-
-    # Force text boxes to match the new reset slider
-    # SectionSliderDragged([0, endTime])
+    
+    rangeSourceTitle.configure(text="Current Source: " + jsonData[currentJson]["name"])
 
     # Update timeline to reflect selected JSON
     # Update timeline playheads to match current state
     tracksRedraw()
-    outputUseCache = False
-    #viewerBuildOutput()
-    viewerRenderAgnostic(scroll=True, scrollTo="playhead")
+    viewerRenderAgnostic(scrollTo="playhead")
 
 def sectionHighlight():
     for i, section in enumerate(sections):
@@ -871,18 +880,36 @@ def sectionHighlight():
         else:
             section["button"].configure(border_width=0)    
 
-def sectionCreate():
-    #print(f"this is idiotic. whats the current json {currentJson}")
+def sectionCreate(isEmpty=False):
+    global currentJson
+    #print(f"this is idiotic., whats the current json {currentJson}")
+    #print(f"HEY IS ISEMPTY TRUE??? {isEmpty}")
+
+    if isEmpty: #tempCurrentJson stores the last value of currentJson so that it can be restored after the empty section is created.
+        tempCurrentJson = currentJson
+        currentJson = 0
+    else:
+        tempCurrentJson = currentJson
+
     if currentJson == -1:
+        print("NO JSONS")
         return
-    
+
     try:
-        hourS = int(hourStart.get() or "0") #or "0" for when text entry is left empty
-        minS = int(minStart.get() or "0")
-        secS = float(secStart.get() or "0")
-        hourE = int(hourEnd.get() or "0")
-        minE = int(minEnd.get() or "0")
-        secE = float(secEnd.get() or "0")
+        if not isEmpty:
+            hourS = int(hourStart.get() or "0") #or "0" for when text entry is left empty
+            minS = int(minStart.get() or "0")
+            secS = float(secStart.get() or "0")
+            hourE = int(hourEnd.get() or "0")
+            minE = int(minEnd.get() or "0")
+            secE = float(secEnd.get() or "0")
+        else:
+            hourS = 0
+            minS = 0
+            secS = 0.0
+            hourE = int(hourEmpty.get() or "0")
+            minE = int(minEmpty.get() or "0")
+            secE = float(secEmpty.get() or "0")
 
     except ValueError:
         messagebox.showwarning("Invalid Input", "Please enter valid numbers for the timestamp.")
@@ -897,37 +924,28 @@ def sectionCreate():
     if(end == 0):
         return
 
-    colorID = sectionGenColor()
-    rangeCreateButton.configure(fg_color = brightColors[colorID])
+    print(f"current json is {currentJson}")
+    print(f"sectionIsSpacer is {sectionIsSpacer()}")
+
+    sectionColor, highlightColor = ("#6B6B6B", "#3A3A3A") if sectionIsSpacer() else (brightColors[sectionGenColor()], yetDarkerColors[sectionGenColor()])
+    rangeCreateButton.configure(fg_color = sectionColor) if not sectionIsSpacer() else None
     sectionButton = customtkinter.CTkButton(
         master=sectionShelf,
         text=str(len(sections) + 1) + " - " + jsonData[currentJson]["name"] + "\n" + helpSecToString(start) + " - " + helpSecToString(end),
         command=lambda index=len(sections): sectionSelect(index)
     )
-    sectionButton.configure(fg_color = brightColors[colorID], hover = False)                #note: ogIndex does not seem to do anything yet
-    sections.append({"jsonIndex":currentJson, "start":start, "end":end, "button":sectionButton, "ogIndex":(len(sections) - 1), "color":brightColors[colorID], "darkerColor":yetDarkerColors[colorID]})
+    sectionButton.configure(fg_color = sectionColor, hover = False) #note: ogIndex does not seem to do anything yet
+    sections.append({"jsonIndex":currentJson, "start":start, "end":end, "button":sectionButton, "ogIndex":(len(sections) - 1), "color":sectionColor, "darkerColor":highlightColor})
     sectionButton.grid(row=len(sections), column=0, padx=5, pady=5, sticky="nsew")
+
+    currentJson = tempCurrentJson
 
     global outputUseCache
     outputUseCache = False
 
     # "Select" the newly created section, handle internally which viewer is open
     print(f"gonna select {len(sections) - 1}")
-    sectionSelect(len(sections) - 1) #Note: Len makes a list of 1 object have a len value of 1
-
-    #Redundant with sectionSelect
-''' tracksRedraw()
-    viewerBuildOutput()
-    viewerRenderAgnostic(scroll=True)'''
-
-    #print(f"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA {len(sections)}")
-
-    #print(f"CHATLOG PLAYHEAD {chatlogPlayheadValue}")
-
-    #if(viewerModeButtons.get() == "Full Sections Output"):
-    #    ScrollViewer(outputPlayheadValue)
-    #else:
-    #    ScrollViewer(chatlogPlayheadValue)
+    sectionSelect(len(sections) - 1) if not isEmpty else None #Note: Len makes a list of 1 object have a len value of 1
 
 def sectionSelect(index):
     global currentSection, currentJson, viewerSection
@@ -1022,9 +1040,13 @@ def sectionGenColor():
     lastColors.append(brightColors[colorID])
     return colorID
 
+def sectionIsSpacer():
+    if currentJson > -1 and jsonData[currentJson].get("path") == None:
+        return True 
+
 # Checks whether the section timestamps make sense, and updates the end accordingly.
 # Seems to be a less friction-inducing implementation.
-def sectionValidEnds(start, end, maxEnd): 
+def sectionValidEnds(start, end, maxEnd):
     if(maxEnd) <= 0 or (start >= maxEnd):
         messagebox.showwarning("Invalid Section", "Specified time can only create section of zero seconds, please try again.")
         return 0
@@ -1035,11 +1057,23 @@ def sectionValidEnds(start, end, maxEnd):
         messagebox.showwarning("Section Warning", "Specified time longer than chatlog.\n\nSetting end to maximum length.")
         return maxEnd
     elif start == end:
+        if sectionIsSpacer():
+            messagebox.showwarning("Invalid Spacer", "Specified spacer has no time. Please try again.")
+            return 0
         messagebox.showwarning("Section Warning", "Section is zero seconds long!\n\nSetting end to maximum length.")
         return maxEnd
 
     # Leave end unchanged if valid.
     return end
+
+#--------------------------------------------------------------------------
+#Callback functions that call KeyPress (used for the shifting and deleting section buttons)
+def callUp():
+    app.event_generate("<Up>")
+def callDown():
+    app.event_generate("<Down>")
+def callDelete():
+    app.event_generate("<Delete>")
 
 #--------------------------------------------------------------------------
 # Parsing helper functions
@@ -1475,7 +1509,7 @@ def viewerScroll(timelineSeconds):
         if(timeLeft) > 7:
             viewer.yview_scroll(-7, "units")
         else:
-            viewer.yview_scroll(-(timeLeft), "units")
+            viewer.yview_scroll(-(int(timeLeft)), "units")
 
         # Highlight the found message
         viewer.tag_add("active_highlight", line_index, f"{line_index} lineend")
@@ -1681,10 +1715,10 @@ jsonShelf.grid(row=2, column=0, rowspan=2, padx=5, pady=5, sticky="nsew")
 #rightSide = customtkinter.CTkFrame(master=app)
 #rightSide.grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
 rightSide.grid_columnconfigure(0, weight=1)
-rightSide.grid_rowconfigure(3, weight=1)
+rightSide.grid_rowconfigure(2, weight=1)
 
 #exportButton. Sends the ordered list of JSONs to the YTT subtitles converter.
-exportButton = customtkinter.CTkButton(master=rightSide, text="Export to YTT", font = ("Roboto", 13), command=exportYTT, fg_color="#2b7a3d", hover_color="#1e5c2d")
+exportButton = customtkinter.CTkButton(master=rightSide, text="Export Subtitles", font = ("Roboto", 14), command=exportYTT, fg_color="#2b7a3d", hover_color="#1e5c2d")
 exportButton.grid(row=0, column=0, padx=5, pady=5, sticky="new")
 
 #settingsButton. doesn't do anything yet
@@ -1696,7 +1730,7 @@ settingsButton.grid(row=1, column=0, padx=5, pady=5, sticky="new")
 #sectionShelf. Where the user reorganizes the order of JSON sections.
 # Change: renamed this to "shelf" to match json list on the left
 sectionShelf = customtkinter.CTkScrollableFrame(master=rightSide)
-sectionShelf.grid(row=2, column=0, rowspan=1, padx=10, pady=10, sticky="nsew")
+sectionShelf.grid(row=2, column=0, rowspan=1, padx=10, pady=(10, 0), sticky="nsew")
 
 sectionShelf.grid_columnconfigure(0, weight=1)
 sectionShelf.grid_rowconfigure(1, weight=1)
@@ -1708,6 +1742,18 @@ sectionShelfTitle.configure(font = ("Roboto", 15))
 sectionTotalTime = customtkinter.CTkLabel(master = sectionShelfTitle, text=f"Total Time: {helpSecToString(getYTTDuration())}")
 sectionTotalTime.grid_rowconfigure(1, weight=0)
 sectionTotalTime.grid(row=1, column=0, padx=0, pady=0, sticky="ew")
+
+#sectionShifterButtons. Section shift and delete buttons
+sectionShifterButtons = customtkinter.CTkFrame(master=rightSide)
+sectionShifterButtons.grid(row=3, column=0, padx=10, pady=(2, 10), sticky="ew")
+sectionShifterButtons.grid_rowconfigure(0, weight=1)
+
+shiftUpButton = customtkinter.CTkButton(master=sectionShifterButtons, text="▲", font = ("Roboto", 18), command=callUp, width=40)
+shiftUpButton.grid(row=0, column=0, padx=(65, 3), pady=5, sticky="ns")
+shiftDownButton = customtkinter.CTkButton(master=sectionShifterButtons, text="▼", font = ("Roboto", 18), command=callDown, width=40)
+shiftDownButton.grid(row=0, column=1, padx=3, pady=5, sticky="ns")
+shiftDownButton = customtkinter.CTkButton(master=sectionShifterButtons, text="⌫", font = ("Roboto", 14), command=callDelete, width=40)
+shiftDownButton.grid(row=0, column=2, padx=3, pady=5, sticky="ns")
 
 #----------------------------------------------------------------------------------------------
 #subtitle settings
@@ -1747,7 +1793,6 @@ durationOptions.grid(row=4, column=1, padx=(0, 8), pady=(2, 6), sticky="ew")
 #rangeBox. Where the user adds a new JSON section to the sectionEditor.
 #Change: sectionAdder to rangeBox
 rangeBox.grid_columnconfigure(0, weight=1)
-rangeBox.grid_rowconfigure(4, weight=1)
 rangeBox.grid_propagate(False)
 
 rangeTitle = customtkinter.CTkLabel(master = rangeBox, text="Create Subtitle Section")
@@ -1796,8 +1841,29 @@ secEnd.configure(width=30, justify="center")
 rangeSlider = CTkRangeSlider(master=rangeBox, from_=0, to=100, width=900, progress_color="#785F65", button_color="#9e0800", button_hover_color="#610500", command=(lambda values: rangeSliderDragged(values, "left"), lambda values: rangeSliderDragged(values, "right")))
 rangeSlider.grid(row=3, column=0, padx=5, pady=2, sticky="ew")
 
-rangeCreateButton = customtkinter.CTkButton(master=rangeBox, text="Create Section", command=sectionCreate)
-rangeCreateButton.grid(row=4, column=0, padx=5, pady=(10,15), sticky="n")
+rangeCreateButton = customtkinter.CTkButton(master=timeEntry, text="Create Section", command=lambda: sectionCreate())
+rangeCreateButton.grid(row=0, column=11, padx=5, pady=(5,3), sticky="n")
+
+emptyCreator = customtkinter.CTkFrame(master=rangeBox)
+emptyCreator.grid(row=5, column=0, padx=1, pady=1, sticky="n")
+emptyCreator.grid_rowconfigure(0, weight=1)
+
+hourEmpty = customtkinter.CTkEntry(emptyCreator, placeholder_text="h")
+hourEmpty.grid(row=0, column=0, padx=(5, 0), pady=5, sticky="n")
+hourEmpty.configure(width=30, justify="center")
+hmemColon = customtkinter.CTkLabel(master = emptyCreator, text=":")
+hmemColon.grid(row=0, column=1, padx=(2, 2.1), pady=5)
+minEmpty = customtkinter.CTkEntry(emptyCreator, placeholder_text="m")
+minEmpty.grid(row=0, column=2, pady=5, sticky="n")
+minEmpty.configure(width=30, justify="center")
+msemColon = customtkinter.CTkLabel(master = emptyCreator, text=":")
+msemColon.grid(row=0, column=3, padx=(2, 2.1), pady=5)
+secEmpty = customtkinter.CTkEntry(emptyCreator, placeholder_text="s")
+secEmpty.grid(row=0, column=4, pady=5, sticky="n")
+secEmpty.configure(width=30, justify="center")
+
+rangeEmptyButton = customtkinter.CTkButton(master=emptyCreator, text="Create Spacer", command=lambda: sectionCreate(isEmpty=True))
+rangeEmptyButton.grid(row=0, column=5, padx=5, pady=5)
 
 #--------------------------------------------------------------------------
 #Middle Section Scroller. The chatlog viewer. Its scrollbar is its own and is NOT connected to any slider as of right now.
@@ -1986,6 +2052,19 @@ def viewerRenderAgnostic(keep=False, scroll=True, scrollTo="top"):
         #print(f"tracksRedraw scroll = {scroll}")
         viewerRenderSource(keep=keep, scroll=scroll)  #Refresh the viewer whenever sections are created, deleted or reordered.
 
+#--------------------------------------------------------------------------
+#-------------------------- INITIALIZE IMPORTS ----------------------------
+#--------------------------------------------------------------------------
+#Things to do when the app starts
+#importEmptyJSON()
+# Create empty jsonData block
+jsonData.append({
+    "path": None,
+    "name": "Spacer",
+    "endTime": 43200,
+    "button": None,
+    "cached_messages": []
+})
 
 #--------------------------------------------------------------------------
 # Keyboard Input

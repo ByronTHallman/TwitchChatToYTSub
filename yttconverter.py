@@ -46,6 +46,10 @@ def generate_ytt(ordered_sections, output_path, comment_font="Sans-serif", font_
 		startTime = section["start"]
 		endTime = section["end"]
 
+		if json_path is None:	# account for spacer logic by shifting forward
+			timeShift += endTime - startTime
+			continue
+
 		# Open the specific JSON file needed for this section
 		with open(json_path, 'r', encoding='UTF-8') as jsonFile:
 			data = json.loads(jsonFile.read())
