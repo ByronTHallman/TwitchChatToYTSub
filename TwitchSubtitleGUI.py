@@ -170,12 +170,14 @@ def importFileJSON():
 
 
     # Refresh viewer contents 
-    if lastChatlogMode == "Full Sections Output":
+    viewerRender(scrollTo="playhead")
+    #these effectively did the exact same thing
+    '''if lastChatlogMode == "Full Sections Output":
         viewerRenderOutput(scrollTo="keep")
         viewerScroll(outputPlayheadValue)
     else:
         viewerRenderSource(keep=True)
-        viewerScroll(chatlogPlayheadValue)
+        viewerScroll(chatlogPlayheadValue)'''
 
     # Redraw the timelines because new "current chatlog" is now different
     # And should be, by definition, blank.
@@ -183,7 +185,7 @@ def importFileJSON():
     outputUseCache = False
 
     # viewerBuildOutput()
-    viewerRenderAgnostic()
+    viewerRender()
     # print(f"ok json current is {currentJson}")
 
 # This works now. Make sure to build with
@@ -321,19 +323,20 @@ def importDownloadURL():
         app.after(0, update_ui)
 
     # Refresh viewer contents 
-    if lastChatlogMode == "Full Sections Output":
+    viewerRender(scrollTo="playhead")
+    #these effectively did the exact same thing
+    '''if lastChatlogMode == "Full Sections Output":
         viewerRenderOutput(scrollTo="playhead")
-        viewerScroll(outputPlayheadValue)
     else:
         viewerRenderSource(keep=True)
-        viewerScroll(chatlogPlayheadValue)
+        viewerScroll(chatlogPlayheadValue)'''
 
     # Redraw the timelines because new "current chatlog" is now different
     # And should be, by definition, blank.
     tracksRedraw()
     outputUseCache = False
     #viewerBuildOutput()
-    viewerRenderAgnostic()
+    viewerRender()
 
     # Entire program froze during download 
     # unless threading was brought in.
@@ -350,6 +353,8 @@ def importDownloadURL():
 # TODO: Move this up top with the rest of the global variables.
 DEFAULT_COLOR = "#bbbbbb" #Used when a chatter has no color in the json
 viewerSection = -1 #Index in sectionList of the selected section, or -1 when a plain chatlog is shown
+viewerOutputSection = -1 #hold on to the last viewersection for output
+
 #rename from
 editedOnly = False #True = hide every message that isn't inside a section
 
@@ -565,8 +570,8 @@ def viewerBuildOutput():
         print("yay")
         outputUseCache = True
 
-def viewerRender(keep=False, scroll=False, scrollTo="top", mode="source"):
-    # Tag meanings:
+def viewerRender(scrollTo="top", isEmpty=False):
+    # NOTE: Tag meanings:
     # "secN" = message section of section N
     # "headerN" = section header row for section N
     # "timestamp" = self explanatory
@@ -576,28 +581,111 @@ def viewerRender(keep=False, scroll=False, scrollTo="top", mode="source"):
     # "active_highlight" = message is scrolled onto and highlighted
 
     # == GLOBALS ==
-    global viewerSection, viewerTimes, outputPlayheadValue
-    mode = viewerModeButtons.get()
-
-    # Store preview view position. Unsure if this is ever used.
+    global viewerSection, viewerOutputSection, viewerTimes, outputPlayheadValue
+    isOutput = (viewerModeButtons.get() == "Full Sections Output")
+    if not isOutput and isEmpty:
+        print("LMAO ITS EMPTY IDIOT")
+        return
+    
+    # Store preview view position. Unsure if this is used?
     previous = viewer.yview()[0]
 
-    # Temporary
-    if keep:
-        scrollTo = "keep"
-    if scroll:
-        scrollTo = "section"
+    if scrollTo == "section":
+        print("wa wah i'm a stupid programming language")
 
-    if mode == "Full Sections Output":
-        viewerBuildOutput()  # Does nothing if outputUseCache is True
+    # == IF OUTPUT MODE ==
+    if isOutput:
+        viewerBuildOutput()  # Does nothing if outputUseCache is True, otherwise BUILD ROWS.
         text = outputText
         ranges = outputRanges
         stampWidth = outputStampWidth
-        firstRow = outputFirstRows
+        firstRows = outputFirstRows
         viewerTimes = outputTimes
-    else:  
+        renderSections = list(enumerate(sections))
+
+    # == IF SOURCE MODE ==
+    else:  # Any other viewer mode.
         if currentJson < 0 or currentJson >= len(jsonData): # Give up if currentJson has invalid index
             return
+        if ((viewerSection < 0 or viewerSection >= len(sections)) 
+                    or (sections[viewerSection]["jsonIndex"] != currentJson)):
+                        if viewerSection != -1:
+                            viewerOutputSection = viewerSection #oh boy another global
+                        viewerSection = -1
+
+        renderSections = []
+        for sectionListIndex, section in enumerate(sections):
+            if section["jsonIndex"] == currentJson:
+                renderSections.append((sectionListIndex, section))
+        
+        # == BUILD ROWS == From current source
+        rows, firstRows, viewerTimes = viewerBuildSource(viewerLoadMessages(currentJson), renderSections, viewerSection, editedOnly)
+        
+        # Account for no rows. Applies only to non-output modes.
+        if not rows:
+            rows = [("", "", "#bbbbbb", "No sections in this chatlog yet." if editedOnly else "This chatlog has no messages.", "out")]
+
+        # == BUILD TEXT == From current rows
+        text, ranges, stampWidth = viewerBuildText(rows)
+
+    # == START RENDER ==
+    viewer.configure(state="normal") # enable editing to change the text
+    viewer.delete("1.0", "end") # DELETES THE ENTIRE VIEWER'S CONTENTS LOL
+    viewer.tag_config("hang", lmargin2=viewerFont.measure("0") * (stampWidth + 2)) #this needs to update
+    
+    for sectionListIndex, section in renderSections:
+        viewer.tag_config("sec" + str(sectionListIndex), background=section["darkerColor"], foreground="#ffffff")
+
+    # == INSERT TEXT INTO VIEWER ==
+    viewer.insert("1.0", text)
+    viewer.tag_add("hang", "1.0", "end") # Apply hang tag to everything?
+
+    # == FORMATTER ==
+    for tag, spans in ranges.items():
+        if tag.startswith("name"):
+            viewer.tag_config(tag, foreground="#" + tag[4:]) # 4 now because not using 2 letter tag names
+            viewer.tag_raise(tag) #name color must win over the block's white text #//does this really need to be done line by line?
+        indexes = []
+        for line, startColumn, endColumn in spans:
+            indexes.append(f"{line}.{startColumn}")
+            if endColumn is None:
+                indexes.append(f"{line + 1}.0") #start of the next line, so the line break is included
+            else:
+                indexes.append(f"{line}.{endColumn}")
+        for i in range(0, len(indexes), 2000): #tag many ranges per call, much faster than one by one
+            viewer.tag_add(tag, *indexes[i:i + 2000])
+
+    # == STOP RENDER ==
+    viewer.tag_raise("timestamp")
+    viewer.tag_raise("active_highlight")
+    viewer.configure(state="disabled")
+
+    print(f"viewerRender: viewerSection is {viewerSection}")
+
+    if scrollTo == "keep":
+        viewer.yview_moveto(previous)
+        
+    elif scrollTo == "top":
+        viewer.yview_moveto(0)
+
+    elif scrollTo == "playhead":
+        viewerScroll(outputPlayheadValue if isOutput else chatlogPlayheadValue)
+
+    elif scrollTo == "section":
+        if isOutput and (0 > viewerSection):
+            viewerSection = viewerOutputSection
+
+        if isOutput and (0 <= viewerSection < len(sections)):
+            firstRows = getSectionStarts()
+            print(f"viewerRender: firstRows is {firstRows}")
+            targetTime = firstRows[viewerSection]
+            timelinesOutputSlider.set(targetTime)
+            outputPlayheadValue = targetTime
+            tracksRefreshPlayheads()
+            viewerScroll(targetTime)
+
+        elif not isOutput and (viewerSection in firstRows):
+            viewerScroll(viewerTimes[firstRows[viewerSection]])
 
 #Redraws the viewer from currentJson / viewerSection / editedOnly.
 #scroll=True jumps to the selected section. keep=True stays at the current scroll position.
@@ -638,7 +726,7 @@ def viewerRenderSource(scroll=False, keep=False, scrollTo="top"):
     for sectionListIndex, section in enumerate(sections):
         if section["jsonIndex"] == currentJson:
             filteredSections.append((sectionListIndex, section))
-    rows, firstRow, viewerTimes = viewerBuildSource(viewerLoadMessages(currentJson), filteredSections, viewerSection, editedOnly)
+    rows, firstRows, viewerTimes = viewerBuildSource(viewerLoadMessages(currentJson), filteredSections, viewerSection, editedOnly)
 
     # == EMPTY CHATLOG? ==
     if not rows:
@@ -688,91 +776,9 @@ def viewerRenderSource(scroll=False, keep=False, scrollTo="top"):
         viewerScroll(chatlogPlayheadValue)
 
     elif ((scrollTo == "section")
-        and (viewerSection in firstRow)):
-            targetTime = viewerTimes[firstRow[viewerSection]]
+        and (viewerSection in firstRows)):
+            targetTime = viewerTimes[firstRows[viewerSection]]
             viewerScroll(targetTime)
-
-    else:
-        # ???
-        return
-
-#Moved viewerRenderOutput
-def viewerRenderOutput(scrollTo="top"):
-    # Tag meanings:
-    # "secN" = message section of section N
-    # "headerN" = section header row for section N
-    # "timestamp" = self explanatory
-    # "out" = message is not in a section
-    # "hang" = a message is indented, remainder pushed onto additional lines
-    # "nm123456" = color tags, where 123456 are hex code values
-    # "active_highlight" = message is scrolled onto and highlighted
-
-    print(f"{outputUseCache}")
-    print(f"viewerRenderOutput: viewerSection is {viewerSection}")
-    print(f"viewerRenderOutput: scrollTo is {scrollTo}")
-
-    viewerBuildOutput()
-
-    # == GLOBALS ==
-    global viewerTimes, outputPlayheadValue
-
-    # Update viewerTimes for Output mode.
-    viewerTimes = outputTimes
-
-    # Store preview view position. Unsure if this is ever used.
-    previous = viewer.yview()[0]
-
-    # Edit prep
-    viewer.configure(state="normal") # enable editing to change the text
-    viewer.delete("1.0", "end") # DELETES THE ENTIRE VIEWER'S CONTENTS LOL
-    viewer.tag_config("hang", lmargin2=viewerFont.measure("0") * (outputStampWidth + 2)) #this needs to update
-
-    # Position for section number, section as corresponding dictionary itself
-    for sectionListIndex, section in enumerate(sections):
-        viewer.tag_config("sec" + str(sectionListIndex), background=section["darkerColor"], foreground="#ffffff")
-
-    # == INSERT TEXT INTO VIEWER ==
-    viewer.insert("1.0", outputText)
-    viewer.tag_add("hang", "1.0", "end") # Apply hang tag to everything
-
-    # == FORMATTER ==
-    for tag, spans in outputRanges.items(): #outputRanges exists so that re-calculating isnt necessary every single reorder or tab switch
-        if tag.startswith("name"):
-            viewer.tag_config(tag, foreground="#" + tag[4:])
-            viewer.tag_raise(tag)
-        indexes = []
-        for line, startColumn, endColumn in spans:
-            indexes.append(f"{line}.{startColumn}")
-            if endColumn is None:
-                indexes.append(f"{line + 1}.0")
-            else:
-                indexes.append(f"{line}.{endColumn}")
-        for i in range(0, len(indexes), 2000):
-            viewer.tag_add(tag, *indexes[i:i + 2000])
-            
-    viewer.tag_raise("timestamp") # Enforce text color on timestsamps
-    viewer.tag_raise("active_highlight") # Overwrite section color with highlight
-
-    # == STOP RENDER ==
-    viewer.configure(state="disabled")
-
-    if scrollTo == "keep":
-        viewer.yview_moveto(previous)
-
-    elif scrollTo == "top":
-        viewer.yview_moveto(0)
-
-    elif scrollTo == "playhead":
-        viewerScroll(outputPlayheadValue)
-
-    elif (scrollTo == "section") and (0 <= viewerSection < len(sections)):
-        firstRows = getSectionStarts()
-        print(f"viewerRenderOutput firstRows: {firstRows}")
-        targetTime = firstRows[viewerSection]
-        timelinesOutputSlider.set(targetTime)
-        outputPlayheadValue = targetTime
-        tracksRefreshPlayheads()
-        viewerScroll(targetTime) #neither of these work
 
     else:
         # ???
@@ -860,18 +866,18 @@ def jsonSelect(index):
 
     # Implode the currently viewed section information
     viewerSection = -1 
-    viewerRenderSource() #Draw it.
-    if lastChatlogMode == "Full Sections Output":
+    viewerRender(scrollTo="playhead") #Draw it.
+    '''if lastChatlogMode == "Full Sections Output": #redundant
         viewerScroll(outputPlayheadValue)
     else:
-        viewerScroll(chatlogPlayheadValue)
+        viewerScroll(chatlogPlayheadValue)'''
     
     rangeSourceTitle.configure(text="Current Source: " + jsonData[currentJson]["name"])
 
     # Update timeline to reflect selected JSON
     # Update timeline playheads to match current state
     tracksRedraw()
-    viewerRenderAgnostic(scrollTo="playhead")
+    viewerRender(scrollTo="playhead")
 
 def sectionHighlight():
     for i, section in enumerate(sections):
@@ -922,12 +928,14 @@ def sectionCreate(isEmpty=False):
     #Update endpoint depending on validity of inputs.
     end = sectionValidEnds(start, end, maxEnd)
     if(end == 0):
+        currentJson = tempCurrentJson
         return
 
     print(f"current json is {currentJson}")
     print(f"sectionIsSpacer is {sectionIsSpacer()}")
 
-    sectionColor, highlightColor = ("#6B6B6B", "#3A3A3A") if sectionIsSpacer() else (brightColors[sectionGenColor()], yetDarkerColors[sectionGenColor()])
+    colorID = sectionGenColor() #gotta synchronize the random colors
+    sectionColor, highlightColor = ("#6B6B6B", "#3A3A3A") if sectionIsSpacer() else (brightColors[colorID], yetDarkerColors[colorID])
     rangeCreateButton.configure(fg_color = sectionColor) if not sectionIsSpacer() else None
     sectionButton = customtkinter.CTkButton(
         master=sectionShelf,
@@ -945,25 +953,27 @@ def sectionCreate(isEmpty=False):
 
     # "Select" the newly created section, handle internally which viewer is open
     print(f"gonna select {len(sections) - 1}")
-    sectionSelect(len(sections) - 1) if not isEmpty else None #Note: Len makes a list of 1 object have a len value of 1
+    sectionSelect(len(sections) - 1, isEmpty=isEmpty) #if not isEmpty else None #Note: Len makes a list of 1 object have a len value of 1
 
-def sectionSelect(index):
+def sectionSelect(index, isEmpty=False):
     global currentSection, currentJson, viewerSection
     global outputUseCache, outputJumppoint
 
+    print(f"sectionSelect: isEmpty is {isEmpty}")
     print(f"index is {index}")
 
     # == UPDATE CURRENT SECTION ==
     # Update currentSection. if index starts at 0, len of sectionList should be 1
     # ALSO updates viewerSection
     if -1 < index < len(sections):
-        currentSection = index
-        viewerSection = index
-        sectionHighlight()
-    else:
+        if not isEmpty: #don't auto-select spacers
+            currentSection = index
+            sectionHighlight()
+        viewerSection = index #update viewerSection even if a spacer
+    else: # invalid section
         sectionHighlight()
         tracksRedraw()
-        viewerRenderAgnostic(scrollTo="top")
+        viewerRender(scrollTo="top")
         return
 
     print(f"len(sections) is {len(sections)}")
@@ -972,7 +982,7 @@ def sectionSelect(index):
     #selected section might be on a different chatlog
     #update timeline to reflect this
     jsonIndex = sections[index]["jsonIndex"]
-    if(currentJson != jsonIndex):
+    if(currentJson != jsonIndex) and not isEmpty: #don't auto-select spacers
         rangeManagement(jsonIndex)
         #(f"currentJson: {currentJson}")
         #print(f"jsonIndex: {jsonIndex}")
@@ -985,7 +995,7 @@ def sectionSelect(index):
     outputUseCache = False
     outputJumppoint = "section" # next switch to output will emphasize "section"
     #viewerBuildOutput()
-    viewerRenderAgnostic(scroll=True, scrollTo="section")
+    viewerRender(scrollTo="section", isEmpty=isEmpty) #scrolls to section even if a spacer
 
 def sectionSwap(index1, index2):
     global sections, outputUseCache, viewerSection, currentSection
@@ -1004,7 +1014,7 @@ def sectionSwap(index1, index2):
     viewerSection = index2
     sectionHighlight()
     tracksRedraw()
-    viewerRenderAgnostic(scrollTo="section")
+    viewerRender(scrollTo="section")
     return
 
 def sectionDelete(index):
@@ -1024,7 +1034,7 @@ def sectionDelete(index):
         viewerSection = -1
         sectionHighlight()
         tracksRedraw()
-        viewerRenderAgnostic(scrollTo="top")
+        viewerRender(scrollTo="top")
     else:
         currentSection = min(index, len(sections) - 1)
         viewerSection = currentSection
@@ -1525,20 +1535,21 @@ def viewerModeSelect(mode):
     if mode == "Source Preview":
         lastChatlogMode = mode # Record mode as last selected:
         editedOnly = False
-        viewerRenderSource(keep=True)
-        viewerScroll(chatlogPlayheadValue)
+        viewerRender(scrollTo="playhead")
+        #viewerScroll(chatlogPlayheadValue)
 
     # Preview only current chatlog's sections
     elif mode == "Source's Sections Only":
         lastChatlogMode = mode # Record mode as last selected:
         editedOnly = True
-        viewerRenderSource(keep=True)
-        viewerScroll(chatlogPlayheadValue)
+        viewerRender(scrollTo="playhead")
+        #viewerScroll(chatlogPlayheadValue)
 
     # Preview output
     elif mode == "Full Sections Output":
-        viewerRenderOutput(scrollTo=outputJumppoint)
-        viewerScroll(outputPlayheadValue)
+        print(outputJumppoint)
+        viewerRender(scrollTo=outputJumppoint)
+        #viewerScroll(outputPlayheadValue)
     
 # Render the current chat row into "small caps" format
 # using funny unicode characters
@@ -1589,11 +1600,9 @@ def viewerUpdateFont(font):
 
         if(viewerModeButtons.get() == "Full Sections Output"):
             viewerTimes = outputTimes # Assign output times list to viewerTimes
-            viewerRenderOutput()
-            viewerScroll(outputPlayheadValue)
-        else:
-            viewerRenderSource()
-            viewerScroll(chatlogPlayheadValue)
+        
+        viewerRender(scrollTo="playhead")
+
     
 
 # Every time you touch the "PREVIEW FONTS" toggle
@@ -1615,11 +1624,8 @@ def viewerFontReset():
         # Rebuild the correct viewer based on active mode
         if viewerModeButtons.get() == "Full Sections Output":
             viewerTimes = outputTimes
-            viewerRenderOutput()
-            viewerScroll(outputPlayheadValue)
-        else:
-            viewerRenderSource()
-            viewerScroll(chatlogPlayheadValue)
+
+        viewerRender(scrollTo="playhead")
 
     else:
         viewerUpdateFont(fontOption.get())
@@ -2044,13 +2050,6 @@ def tracksRedraw():
     else:
         #print(f"tracksRedraw scroll = {scroll}")
         viewerRenderSource(keep=keep, scroll=scroll)  #Refresh the viewer whenever sections are created, deleted or reordered.'''
-
-def viewerRenderAgnostic(keep=False, scroll=True, scrollTo="top"):
-    if viewerModeButtons.get() == "Full Sections Output":
-        viewerRenderOutput(scrollTo=scrollTo) # Refresh viewer if currently in output mode
-    else:
-        #print(f"tracksRedraw scroll = {scroll}")
-        viewerRenderSource(keep=keep, scroll=scroll)  #Refresh the viewer whenever sections are created, deleted or reordered.
 
 #--------------------------------------------------------------------------
 #-------------------------- INITIALIZE IMPORTS ----------------------------
