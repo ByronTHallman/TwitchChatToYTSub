@@ -1,23 +1,83 @@
-import atexit
-import tempfile
-import os # for handling download management
-from CTkRangeSlider import *
-import customtkinter
-import tkinter
-import json
-import re #Used to identify chatter name colors from the json
-import tkinter.font as tkfont #Monospace font for the chatlog viewer.
-import bisect
-import random
-import copy
+# Standard Libraries
+import os        # for handling download management, filepaths
+import sys       # for assigning the icon, determining platform during fonts
+import ctypes    # for setting Windows taskbar icon
+import atexit    # to auto-delete tempfiles on close
+import tempfile  # tempfiles for downloaded jsons
+import bisect    # for searching message rows
+import random    # for random colors
 import threading # important for downloading
-from datetime import datetime, timedelta # importing time and date to get downloaded vod dates from first message.
-import yttconverter
-import chat_downloader
-from chat_downloader import ChatDownloader
-from tkinter import filedialog, messagebox
-from pathlib import Path
-from dataclasses import dataclass
+import json      # used to parse json files
+import re        # used to identify chatter name colors from the json (viewerParseComment)
+import tkinter   # used for viewer module
+import tkinter.font as tkfont # monospace font for viewer module.
+
+from tkinter import filedialog, messagebox  # for imports and errors
+from datetime import datetime, timedelta    # importing time and date to get downloaded vod dates from first message.
+from pathlib import Path                    # filepaths for tempfiles, json label fallbacks
+
+# Third Party Imports
+import customtkinter                            # the basis for this entire GUI
+from CTkRangeSlider import *                    # range sliders for
+from tkinterdnd2 import DND_FILES, TkinterDnD   # for dragging and dropping files as import method
+from chat_downloader import ChatDownloader      # for downloading from twitch urls directly NOTE: SPECIFICALLY Indigo128's fork, as Xenova's does <<NOT>> work
+
+# Local Imports
+import yttconverter # export conversion process!
+
+#--------------------------------------------------------------------------
+# Class Wrapper (to allow drag-and-drop) (if we decide we don't want this, very easy to remove, just assign "app" class accordingly)
+class CTkDnD(customtkinter.CTk, TkinterDnD.DnDWrapper):
+
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.TkdndVersion = TkinterDnD._require(self)
+
+'''     
+    ================== COMPILING NOTES ==================
+
+    NOTE:
+    * install tkinterdnd2 to your environment when building
+    WIN: python -m pip install tkinterdnd2
+        or
+    MAC: python3 -m pip install tkinterdnd2
+
+    NOTE:
+    * install pillow for icon stuff
+    WIN: python -m pip install pillow
+        or
+    MAC: python3 -m pip install pillow
+
+    NOTE FOR COMPILING:
+    Compile with:
+    python -m PyInstaller --noconsole --onefile --collect-all customtkinter --collect-all chat_downloader --collect-all CTKRangeSlider --collect-all tkinterdnd2 --collect-all PIL --add-data "icons/icon.ico;icons" --icon=icons/icon.ico TwitchSubtitleGUI.py
+
+    or, for Mac
+    python3 -m PyInstaller --noconsole --onefile --collect-all customtkinter --collect-all chat_downloader --collect-all tkinterdnd2 --collect-all PIL --add-data "icons/icon.png:icons" --icon=icons/icon.png TwitchSubtitleGUI.py
+    
+'''
+
+#--------------------------------------------------------------------------
+# Resources
+def getIconPath(relativePath):
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relativePath)
+
+if sys.platform == "win32":
+  ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+      "ttvsubgui.ttvsubgui.1"
+  )
+
+'''
+
+To update the icon to a different png and not a dopey cat:
+
+python -c "from PIL import Image; Image.open('icon.png').save('ico.ico')"    
+
+'''
 
 #--------------------------------------------------------------------------
 # Exceptions
@@ -34,11 +94,29 @@ class NonMediaError(Exception):
 customtkinter.set_appearance_mode("dark")
 customtkinter.set_default_color_theme("dark-blue")
 
-app = customtkinter.CTk()  # creates the window
+#NOTE: Updated the app class to "CTkDnD"
+app = CTkDnD()  # creates the window
+TkinterDnD.require(app) # for the class wrapper
+
 app.geometry("1000x800")
 app.resizable(False, False) #The timelines sorta break if the window is resizable.
-app.title("Green Squirrel In Pretty Bad Shape")
+app.title("Feal Like Crab")
 app.focus_force()
+
+# Windows Icon
+if sys.platform == "win32":
+    from PIL import Image, ImageTk                      # library for building the icon, conditional as don't really want this to bleed into the mac build
+    #app.after(300, lambda: app.iconbitmap(getIconPath("icons/icon.ico")))
+    icon_path = getIconPath("icons/icon.ico")           # inshallah the icons will be baked into the executable at this point and takes it from there
+    app.iconbitmap(icon_path)                           # set windows taskbar icon
+    tk_icon = ImageTk.PhotoImage(Image.open(icon_path)) # uses pillow to convert .ico into an image object to prevent garbage collection
+    app.iconphoto(True, tk_icon)                        # push imagetk thing into window manager icon slot
+    app.after(250, lambda: app.iconbitmap(icon_path))   # safeguard
+
+# Mac Icon
+elif sys.platform == "darwin":
+    icon = tkinter.PhotoImage(file=getIconPath("icons/icon.png"))
+    app.after(250, lambda: app.iconphoto(True, icon))
 
 # Colors
 brightColors = [ # Some hand-picked OKLCH colors
@@ -53,14 +131,13 @@ TwitchUserColors = ( # Random colors directly from Twitch for unassigned name co
     "#FF4500", "#FF0000", "#2E8B57", "#00FF7F", "#9ACD32",)
 lastColors = ["#000000", "#000000", "#000000", "#000000"] # Ensures that the last 4 colors aren't repeats
 
-# Source management global variables
-jsonData = []      # List of dictionaries for full chatlogs. "path", "name", "endTime"
-currentJson = -1   # The index of the current JSON in jsonData
-emptyJsonPath = Path("./Assets/Empty.json")
+# Chatlog source management global variables
+jsonData = []       # List of dictionaries for full chatlogs. "path", "name", "endTime"
+currentJson = -1    # The index of the current JSON in jsonData
 
 # Section management global variables
-sections = []   # List of dictionaries. "jsonIndex", "start", "end", "button", "ogIndex", "color", "darkerColor"
-currentSection = 0 # The index of the current section in sectionList
+sections = []       # List of dictionaries. "jsonIndex", "start", "end", "button", "ogIndex", "color", "darkerColor"
+currentSection = 0  # The index of the current section in sectionList
 
 # Timeline and specific numeric global variables.
 timelineMinx = 50   # The lefthand side of the timelines.
@@ -72,31 +149,37 @@ yttLine = 240       # The y values of the output timeline.
 # Timeline slider global variables
 chatlogPlayheadValue = 0      # Global variable storing first timeline playhead value for access.
 outputPlayheadValue = 0       # Global variable storing second timeline playhead value for access.
-#rangeSliderValues = (0, 0)   # Global variable for storing last known min and max for the section creation range slider.
-rangeSliderValues = {}        # Global variable storing keys associated with tuples representing slider range values.
+rangeSliderValues = {}        # Global dict storing keys assigned TRIPLES representing slider range left, right handle values AND slide ranger length.
 
 # Viewer global variables
-viewerTimes = []                 # Stored message time values for chat viewer interaction with sliders
-settingsSmallCaps = False           # Global check for if the "Small Caps" font is being used
-lastChatlogMode = "Source Preview"  # Keeps track of the last used chatlog viewer mode
+viewerTimes = []                    # Stored message times for viewer interaction with sliders
+settingsSmallCaps = False           # Global check for if "Small Caps" font is enabled
+lastChatlogMode = "Source Preview"  # Keeps track of the last used chatlog source Viewer mode
 
 # Output global variables to store viewer's output mode data
-outputTimes = []     # Stores all OUTPUT message times, used for bisect searching section endpoints
-outputText = ""      # Pre-rendered text string
-outputRanges = {}    # Pre-computed tag ranges
-outputStampWidth = 0 # Pre-calculated timestamp column width
-outputFirstRows = {}  # Tracks section starting times
-outputUseCache = False
-outputJumppoint = "playhead"
+outputTimes = []             # Stores all OUTPUT message times, used for bisect searching section endpoints
+outputText = ""              # Cached text string
+outputRanges = {}            # Cached tag ranges
+outputStampWidth = 0         # Cached timestamp column width
+outputFirstRows = {}         # Cached tacks section starting times
+outputUseCache = False       # IF CALLED TRUE, tells viewerBuildOutput to use the above cached values or rebuild them from scratch.
+outputJumppoint = "playhead" # Determines whether user last touched Output timeline playhead, or sections shelf. Determines what Viewer displays when returning to Output mode.
 
 # Tempfile global variables
 tempDownloads = [] #Any file downloaded by URL will be added to this list to be removed on shutdown
 tempDir = tempfile.gettempdir()
 
+# Viewer module global variables
+viewerDefaultColor = "#bbbbbb" # NOTE: CURRENTLY UNUSED, REPLACED BY TwitchUserColors. Used when a chatter has no color in the json
+viewerSection = -1               # Index in sectionList of the selected section, or -1 when a plain chatlog is shown
+viewerOutputSection = -1         # hold on to the LAST KNOWN viewerSection for Output mode
+
 #--------------------------------------------------------------------------
 #Functions
 #Opens JSON file picker, imports, and adds data to jsonData
-def importFileJSON():
+def importFileJSON(droppedFile=None):
+
+    promptUser = True if not droppedFile else False
 
     # Create a placeholder "Importing..." card
     # (before filedialog process because
@@ -109,12 +192,16 @@ def importFileJSON():
     )
     jsonCard.grid(row=len(jsonData) + 1, column=0, padx=5, pady=2, sticky="ew")
 
-
     # Prompt user for JSON.
-    filePath = filedialog.askopenfilename(
-        title="Import JSON file",
-        filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-    )
+    if promptUser:
+        filePath = filedialog.askopenfilename(
+            title="Import JSON file",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+
+    if droppedFile:
+        filePath = droppedFile
+
     if not filePath:
         # Delete "Importing..."" card if import is missing.
         app.after(0, jsonCard.destroy)
@@ -129,7 +216,6 @@ def importFileJSON():
         messagebox.showerror("Import failed", f"Could not load this JSON file:\n{error}")
         app.after(0, jsonCard.destroy)
         return
-
 
     # Take stream info metadata to create chatlog label.
     json_metadata = importQueryJSON(imported_data)
@@ -149,7 +235,7 @@ def importFileJSON():
 
     # Attach this JSON to the chain of chatlog information.
     jsonData.append({"path":filePath, "name":json_label, "endTime":duration, "button": jsonCard})
-    if len(jsonData) >= 2:
+    if len(jsonData) > 1:
         #print(len(jsonData) - 1)
         jsonSelect(len(jsonData) - 1)
 
@@ -168,11 +254,10 @@ def importFileJSON():
         command=lambda index=len(jsonData) - 1: jsonSelect(index)
     )
 
-
     # Refresh viewer contents 
-    viewerRender(scrollTo="playhead")
+    #viewerRender(scrollTo="playhead") NOTE: Made redundant by viewerSelect
     #these effectively did the exact same thing
-    '''if lastChatlogMode == "Full Sections Output":
+    '''if lastChatlogMode == "Section Editor Output":
         viewerRenderOutput(scrollTo="keep")
         viewerScroll(outputPlayheadValue)
     else:
@@ -181,11 +266,11 @@ def importFileJSON():
 
     # Redraw the timelines because new "current chatlog" is now different
     # And should be, by definition, blank.
-    tracksRedraw()
-    outputUseCache = False
+    #tracksRedraw() Made redundant by viewerSelect
+    #outputUseCache = False NOTE: Imports shouldn't change the output timeline.
 
     # viewerBuildOutput()
-    viewerRender()
+    #viewerRender() NOTE: Made redundant by viewerSelect
     # print(f"ok json current is {currentJson}")
 
 # This works now. Make sure to build with
@@ -323,9 +408,9 @@ def importDownloadURL():
         app.after(0, update_ui)
 
     # Refresh viewer contents 
-    viewerRender(scrollTo="playhead")
+    #viewerRender(scrollTo="playhead") NOTE: Made redundant by jsonSelect
     #these effectively did the exact same thing
-    '''if lastChatlogMode == "Full Sections Output":
+    '''if lastChatlogMode == "Section Editor Output":
         viewerRenderOutput(scrollTo="playhead")
     else:
         viewerRenderSource(keep=True)
@@ -333,10 +418,10 @@ def importDownloadURL():
 
     # Redraw the timelines because new "current chatlog" is now different
     # And should be, by definition, blank.
-    tracksRedraw()
+    #tracksRedraw() NOTE: Made redundant by jsonSelect
     outputUseCache = False
     #viewerBuildOutput()
-    viewerRender()
+    #viewerRender() NOTE: Made redundant by jsonSelect
 
     # Entire program froze during download 
     # unless threading was brought in.
@@ -344,6 +429,14 @@ def importDownloadURL():
 
     #print(f"ok json current is {currentJson}")
 
+def importFileDrop(event):
+    dropped_files = app.tk.splitlist(event.data)
+
+    for droppedFile in dropped_files:
+        if droppedFile.lower().endswith(".json"):
+            importFileJSON(droppedFile)
+        else:
+            messagebox.showerror("Import failed", f"Please drop a valid Twitch JSON chat log.",)
 
 #--------------------------------------------------------------------------
 # CHATLOG / SECTION MANAGEMENT
@@ -351,12 +444,9 @@ def importDownloadURL():
 # Visualizer
 #Chatlog Viewer. A scrollable list: timestamp on the left, then the colored name and the message. Section text is highlighted as a block.
 # TODO: Move this up top with the rest of the global variables.
-DEFAULT_COLOR = "#bbbbbb" #Used when a chatter has no color in the json
-viewerSection = -1 #Index in sectionList of the selected section, or -1 when a plain chatlog is shown
-viewerOutputSection = -1 #hold on to the last viewersection for output
 
 #rename from
-editedOnly = False #True = hide every message that isn't inside a section
+viewerSectionsOfSourceOnly = False #True = hide every message that isn't inside a section
 
 # TODO: Group this with helper functions
 #Used to sort messages by their time. 
@@ -423,39 +513,6 @@ def viewerLoadMessages(index):
     jsonEntry["cached_messages"] = messages #Prevent re-loading an already parsed JSON file
     return messages
 
-#Sections is a list of (position in sectionList, section dict) for this chatlog.
-#Returns (rows, firstRow). rows is a list of (timestamp, name, name color, body, tag), tag is "out" or "sec<position>".
-#firstRow maps position -> index of that section's first row.
-def viewerBuildSource(messages, sections, selected, editedOnlyMode):
-    rows = []
-    firstRow = {}
-    timeList = [] # let's not throw time away
-    for time, name, body, darkerColor in messages:
-        #Collect every section that contains this message.
-        #print(t)
-        matchingSections = []
-        for position, section in sections:
-            if section["start"] <= time <= section["end"]:
-                matchingSections.append(position)
-
-        if len(matchingSections) > 0: #Find AT LEAST one section that overlaps this message
-            #In cases of a selected section already having a color, the color will not change
-            chosenPosition = matchingSections[0]
-            for position in matchingSections:
-                if position == selected:
-                    chosenPosition = position
-            tag = "sec" + str(chosenPosition)
-            if chosenPosition not in firstRow: #don't rewrite firstRow for every single row, just the first one?
-                firstRow[chosenPosition] = len(rows) #remember where this section first shows up, and NEVER do it again?
-        else: #Message is outside ALL cuts, label accordingly
-            if editedOnlyMode:
-                continue #If in viewer mode 2, stop the entire loop and stop rendering past the section
-            tag = "out"
-
-        rows.append((helpSecToString(int(time)), name, darkerColor, body, tag))
-        timeList.append(int(time)) # keep the time values to inform the highlighted message mechanic #changed float to int
-
-    return rows, firstRow, timeList # !!! catch time values to put into viewerMessageTimes
 
 #Turns rows into the text to insert and the character ranges to tag.
 #Returns (text, ranges, stampWidth). ranges maps tag -> list of (line, startColumn, endColumn), lines start at 1.
@@ -498,9 +555,42 @@ def viewerBuildText(rows):
     # Concatenate every line with \n, return as (all rows, ranges, widths)
     return "\n".join(lines), ranges, stampWidth
 
+#Sections is a list of (position in sectionList, section dict) for this chatlog.
+#Returns (rows, firstRow). rows is a list of (timestamp, name, name color, body, tag), tag is "out" or "sec<position>".
+#firstRow maps position -> index of that section's first row.
+def viewerBuildSourceRows(messages, sections, selected, sectionsOnlyMode):
+    rows = []
+    firstRow = {}
+    timeList = [] # let's not throw time away
+    for time, name, body, darkerColor in messages:
+        #Collect every section that contains this message.
+        #print(t)
+        matchingSections = []
+        for position, section in sections:
+            if section["start"] <= time <= section["end"]:
+                matchingSections.append(position)
+
+        if len(matchingSections) > 0: #Find AT LEAST one section that overlaps this message
+            #In cases of a selected section already having a color, the color will not change
+            chosenPosition = matchingSections[0]
+            for position in matchingSections:
+                if position == selected:
+                    chosenPosition = position
+            tag = "sec" + str(chosenPosition)
+            if chosenPosition not in firstRow: #don't rewrite firstRow for every single row, just the first one?
+                firstRow[chosenPosition] = len(rows) #remember where this section first shows up, and NEVER do it again?
+        else: #Message is outside ALL cuts, label accordingly
+            if sectionsOnlyMode:
+                continue #If in viewer mode 2, stop the entire loop and stop rendering past the section
+            tag = "out"
+
+        rows.append((helpSecToString(int(time)), name, darkerColor, body, tag))
+        timeList.append(int(time)) # keep the time values to inform the highlighted message mechanic #changed float to int
+
+    return rows, firstRow, timeList # !!! catch time values to put into viewerMessageTimes
 
 # Output preview related functions
-def viewerBuildOutput():
+def viewerBuildOutputRows():
     global outputText, outputRanges, outputStampWidth
     global outputTimes, outputUseCache
 
@@ -582,20 +672,20 @@ def viewerRender(scrollTo="top", isEmpty=False):
 
     # == GLOBALS ==
     global viewerSection, viewerOutputSection, viewerTimes, outputPlayheadValue
-    isOutput = (viewerModeButtons.get() == "Full Sections Output")
+    isOutput = (viewerModeButtons.get() == "Section Editor Output")
     if not isOutput and isEmpty:
-        print("LMAO ITS EMPTY IDIOT")
+        print("LMAO ITS EMPTY")
         return
     
     # Store preview view position. Unsure if this is used?
     previous = viewer.yview()[0]
 
     if scrollTo == "section":
-        print("wa wah i'm a stupid programming language")
+        print("wa wah i'm a dumb programming language")
 
     # == IF OUTPUT MODE ==
     if isOutput:
-        viewerBuildOutput()  # Does nothing if outputUseCache is True, otherwise BUILD ROWS.
+        viewerBuildOutputRows()  # Does nothing if outputUseCache is True, otherwise BUILD ROWS.
         text = outputText
         ranges = outputRanges
         stampWidth = outputStampWidth
@@ -619,11 +709,11 @@ def viewerRender(scrollTo="top", isEmpty=False):
                 renderSections.append((sectionListIndex, section))
         
         # == BUILD ROWS == From current source
-        rows, firstRows, viewerTimes = viewerBuildSource(viewerLoadMessages(currentJson), renderSections, viewerSection, editedOnly)
+        rows, firstRows, viewerTimes = viewerBuildSourceRows(viewerLoadMessages(currentJson), renderSections, viewerSection, viewerSectionsOfSourceOnly)
         
         # Account for no rows. Applies only to non-output modes.
         if not rows:
-            rows = [("", "", "#bbbbbb", "No sections in this chatlog yet." if editedOnly else "This chatlog has no messages.", "out")]
+            rows = [("", "", "#bbbbbb", "No sections in this chatlog yet." if viewerSectionsOfSourceOnly else "This chatlog has no messages.", "out")]
 
         # == BUILD TEXT == From current rows
         text, ranges, stampWidth = viewerBuildText(rows)
@@ -687,103 +777,6 @@ def viewerRender(scrollTo="top", isEmpty=False):
         elif not isOutput and (viewerSection in firstRows):
             viewerScroll(viewerTimes[firstRows[viewerSection]])
 
-#Redraws the viewer from currentJson / viewerSection / editedOnly.
-#scroll=True jumps to the selected section. keep=True stays at the current scroll position.
-def viewerRenderSource(scroll=False, keep=False, scrollTo="top"):
-    # Tag meanings:
-    # "secN" = message section of section N
-    # "headerN" = section header row for section N
-    # "timestamp" = self explanatory
-    # "out" = message is not in a section
-    # "hang" = a message is indented, remainder pushed onto additional lines
-    # "nm123456" = color tags, where 123456 are hex code values
-    # "active_highlight" = message is scrolled onto and highlighted
-
-    # Temporary
-    if keep:
-        scrollTo = "keep"
-    if scroll:
-        scrollTo = "section"
-
-    # == GLOBALS ==
-    global viewerSection, viewerTimes # need to catch the times for highlighted comment mechanic
-    
-    # Give up if currentJson has invalid index
-    if currentJson < 0 or currentJson >= len(jsonData):
-        return
-    # Reset "viewerSection" global if invalid
-    if ((viewerSection < 0 or viewerSection >= len(sections)) # is viewerSection out of bounds?
-        or (sections[viewerSection]["jsonIndex"] != currentJson)): # pointing to a different section?
-            viewerSection = -1
-
-    # Store preview view position. Unsure if this is ever used.
-    previous = viewer.yview()[0]
-
-    # == FILTER SECTIONS ==
-    # Collect the sections that belong to the chatlog being shown, 
-    # along with their position in sectionList.
-    filteredSections = []
-    for sectionListIndex, section in enumerate(sections):
-        if section["jsonIndex"] == currentJson:
-            filteredSections.append((sectionListIndex, section))
-    rows, firstRows, viewerTimes = viewerBuildSource(viewerLoadMessages(currentJson), filteredSections, viewerSection, editedOnly)
-
-    # == EMPTY CHATLOG? ==
-    if not rows:
-        rows = [("", "", "#bbbbbb", "No sections in this chatlog yet." if editedOnly else "This chatlog has no messages.", "out")]
-    text, ranges, stampWidth = viewerBuildText(rows)
-
-    # == START RENDER ==
-    viewer.configure(state="normal") # enable editing to change the text
-    viewer.delete("1.0", "end") # DELETES THE ENTIRE VIEWER'S CONTENTS LOL
-    viewer.tag_config("hang", lmargin2=viewerFont.measure("0") * (stampWidth + 2)) #this needs to update
-
-    for sectionListIndex, section in filteredSections:
-        viewer.tag_config("sec" + str(sectionListIndex), background=section["darkerColor"], foreground="#ffffff")
-
-    # == INSERT TEXT INTO VIEWER ==
-    viewer.insert("1.0", text)
-    viewer.tag_add("hang", "1.0", "end") # Apply hang tag to everything
-
-    # == FORMATTER ==
-    for tag, spans in ranges.items():
-        if tag.startswith("name"):
-            viewer.tag_config(tag, foreground="#" + tag[4:])
-            viewer.tag_raise(tag) #name color must win over the block's white text
-        indexes = []
-        for line, startColumn, endColumn in spans:
-            indexes.append(f"{line}.{startColumn}")
-            if endColumn is None:
-                indexes.append(f"{line + 1}.0") #start of the next line, so the line break is included
-            else:
-                indexes.append(f"{line}.{endColumn}")
-        for i in range(0, len(indexes), 2000): #tag many ranges per call, much faster than one by one
-            viewer.tag_add(tag, *indexes[i:i + 2000])
-
-    viewer.tag_raise("timestamp")
-    viewer.tag_raise("active_highlight")
-
-    # == STOP RENDER ==
-    viewer.configure(state="disabled")
-
-    if scrollTo == "keep":
-        viewer.yview_moveto(previous) 
-
-    elif scrollTo == "top":
-        viewer.yview_moveto(0)
-
-    elif scrollTo == "playhead":
-        viewerScroll(chatlogPlayheadValue)
-
-    elif ((scrollTo == "section")
-        and (viewerSection in firstRows)):
-            targetTime = viewerTimes[firstRows[viewerSection]]
-            viewerScroll(targetTime)
-
-    else:
-        # ???
-        return
-
 def rangeStore(rangeSlider, index):
     values = rangeSlider.get() or [0, 100] #default to [0, 100] if range isn't stored
     rangeSliderValues[index] = (values[0], values[1], rangeSlider.cget("to")) #add positions and endpoint
@@ -792,9 +785,14 @@ def rangePull(index):
     rangeTriple = (0, 100, 100) #Default values
 
     if index in rangeSliderValues:
-        rangeTriple = rangeSliderValues.get(index) # Take stored ranges if available
-    elif -1 < index < len(jsonData):
-        endTime = jsonData[index].get("endTime", 100) # Normal case of new source, take endTime.
+        rangeTriple = rangeSliderValues.get(index)      # Take STORED ranges if available
+
+    elif -1 < index < len(jsonData):                    # Unstored?
+        endTime = jsonData[index].get("endTime", 100)   # get normal souce's endpoint, fallback to 100 if none exist
+
+        if jsonData[index].get("path") is None:         # check if pulled source is a spacer
+            endTime = min(endTime, 1800)                # spacer ranges visualize to only 30 minutes
+
         rangeTriple = (0, endTime, endTime)
     else:
         print("...There's no sources. How did you even get here?") # currentJson == -1, No sources.
@@ -806,10 +804,10 @@ def rangePull(index):
 def rangeManagement(index):
     if(currentJson > -1): #Shouldn't have to check for this, but whatever
         if(currentJson != index): # are we not clicking a JSON we are already looking at?
-            #1. store stupid current slider state
+            #1. store current slider state
             rangeStore(rangeSlider, currentJson) # adds a triple to rangeSliderValues: (left, right, and length) from CURRENT json
 
-            #2. pull dumb state for new json key 
+            #2. pull state for new json key 
             rangeLeft, rangeRight, rangeLimit = rangePull(index) # PULLS a triple, left, rights, lenght; defaults to (0, 100, 100)
 
             #3. set the sliders in the right place. and markers
@@ -865,9 +863,9 @@ def jsonSelect(index):
     jsonHighlight()
 
     # Implode the currently viewed section information
-    viewerSection = -1 
-    viewerRender(scrollTo="playhead") #Draw it.
-    '''if lastChatlogMode == "Full Sections Output": #redundant
+    #viewerSection = -1 
+    #viewerRender(scrollTo="playhead") #Draw it.
+    '''if lastChatlogMode == "Section Editor Output": #redundant
         viewerScroll(outputPlayheadValue)
     else:
         viewerScroll(chatlogPlayheadValue)'''
@@ -878,6 +876,7 @@ def jsonSelect(index):
     # Update timeline playheads to match current state
     tracksRedraw()
     viewerRender(scrollTo="playhead")
+    print("jsonSelect")
 
 def sectionHighlight():
     for i, section in enumerate(sections):
@@ -1064,11 +1063,14 @@ def sectionValidEnds(start, end, maxEnd):
         messagebox.showwarning("Section Warning", "Please make sure your start is not before your end.\n\nSetting end to maximum length.")
         return maxEnd
     elif(end > maxEnd):
+        if sectionIsSpacer():
+            messagebox.showwarning("Invalid Spacer", "Cannot make individual spacers longer than 12 hours.\n\nPlease try again.")
+            return 0
         messagebox.showwarning("Section Warning", "Specified time longer than chatlog.\n\nSetting end to maximum length.")
         return maxEnd
     elif start == end:
         if sectionIsSpacer():
-            messagebox.showwarning("Invalid Spacer", "Specified spacer has no time. Please try again.")
+            messagebox.showwarning("Invalid Spacer", "Specified spacer has no time.\n\nPlease try again.")
             return 0
         messagebox.showwarning("Section Warning", "Section is zero seconds long!\n\nSetting end to maximum length.")
         return maxEnd
@@ -1124,7 +1126,7 @@ def downloaderFormatComment(comment):
 
 # Writes the string for the Chatlog list labels.
 def jsonWriteLabel(metadata, vod_chat):
-    # TODO: Make the logical organization of this less ridiculously stupid.
+    # TODO: Make the logical organization of this less messy?
     if vod_chat:
         media_type = getattr(vod_chat, 'video_type', 'unknown')
         if media_type == "video":
@@ -1344,13 +1346,20 @@ def rangeUpdateBoxes(hr_box, min_box, sec_box, sliderValue):
     min_box.delete(0, "end"), min_box.insert(0, str(m))
     sec_box.delete(0, "end"), sec_box.insert(0, str(s))
 
+# Special function for when user has selected the spacer "source"
+# Updates spacer entry boxes to be the maximum handle minus the minimum handle
+def rangeUpdateSpacer():
+    start_sec, end_sec = rangeSlider.get()
+    total_sec = max(0, int(end_sec) - int(start_sec))
+    rangeUpdateBoxes(hourEmpty, minEmpty, secEmpty, total_sec)
+
 # Initiates changes to the entry boxes
 # depending on range slider positions
 def rangeSliderDragged(sliderValue, side):
     global lastChatlogMode, chatlogPlayheadValue
 
     # If in output, activate last used chatlog mode
-    if viewerModeButtons.get() == "Full Sections Output":
+    if viewerModeButtons.get() == "Section Editor Output":
         viewerModeButtons.set(lastChatlogMode)
         viewerModeSelect(lastChatlogMode)
 
@@ -1362,13 +1371,6 @@ def rangeSliderDragged(sliderValue, side):
     
     chatlogPlayheadValue = sliderValue
 
-    #if(side == "left"):
-    #    chatlogPlayheadValue = sliderValue
-    #elif(side == "right"):
-    #    chatlogPlayheadValue = sliderMax
-
-    #print(chatlogPlayheadValue)
-
     if currentJson == -1: #or sliderMax == 0:
         return
 
@@ -1377,30 +1379,10 @@ def rangeSliderDragged(sliderValue, side):
     elif(side == "right"):
         rangeUpdateBoxes(hourEnd, minEnd, secEnd, sliderValue) #update ends
 
+    if sectionIsSpacer():
+        rangeUpdateSpacer()
+
     viewerScroll(sliderValue)
-    # def UpdateBoxes(h_box, m_box, s_box, sliderLen):
-    #     total_sec = max(0, int(sliderLen))
-    #     h, rem = divmod(total_sec, 3600)
-    #     m, s = divmod(rem, 60)
-        
-    #     h_box.delete(0, "end"), h_box.insert(0, str(h))
-    #     m_box.delete(0, "end"), m_box.insert(0, str(m))
-    #     s_box.delete(0, "end"), s_box.insert(0, str(s))
-
-    # UpdateBoxes(hourStart, minStart, secStart, sliderMin) #update starts
-    # UpdateBoxes(hourEnd, minEnd, secEnd, sliderMax) #update ends
-
-    #if sliderMin != rangeSliderValues[0]:
-    #    # The left (start) handle moved
-    #    if viewerMessageTimes:
-    #        ScrollViewer(int(sliderMin))
-            
-    #elif sliderMax != rangeSliderValues[1]:
-    #    # The right (end) handle moved
-    #    if viewerMessageTimes:
-    #        ScrollViewer(int(sliderMax))
-
-    #rangeSliderValues = (sliderMin, sliderMax)
     
 # Entry boxes: make sure they update the
 # the positions of the sectioner range handles
@@ -1448,8 +1430,31 @@ def rangeUpdateHandles(event=None):
 # Section timeline slider functions
 # Update title string.
 def tracksUpdateTitles():
-    timelines.itemconfig(timelinesChatlogTitle, text=str(f"Current Source: {int(chatlogPlayheadValue)} Seconds"))
-    timelines.itemconfig(timelinesOutputTitle, text=str(f"Full Sections Output: {int(outputPlayheadValue)} Seconds"))  
+    None
+    '''timelinesChatlogTitle.configure(
+      text=f"Current Source: {int(chatlogPlayheadValue)} Seconds"
+    )
+    timelinesOutputTitle.configure(
+      text=f"Full Sections Output: {int(outputPlayheadValue)} Seconds"
+    )'''
+    #timelines.itemconfig(timelinesChatlogTitle, text=str(f"Current Source: {int(chatlogPlayheadValue)} Seconds"))
+    #timelines.itemconfig(timelinesOutputTitle, text=str(f"Full Sections Output: {int(outputPlayheadValue)} Seconds"))  
+
+def tracksEmphasizeMode(isOutput=False):
+    if isOutput:
+        timelinesChatlogTitle.configure(
+            border_color="#242424" #Matching canvas with customtkinter color"
+        )
+        timelinesOutputTitle.configure(
+            border_color="#2b7a3d"
+        )
+    else:
+        timelinesChatlogTitle.configure(
+            border_color="#1f538d"
+        )
+        timelinesOutputTitle.configure(
+            border_color="#242424"
+        )
 
 # Update both timeline playhead lines and number values.
 def tracksRefreshPlayheads():
@@ -1529,26 +1534,29 @@ def viewerScroll(timelineSeconds):
 
 # For choosing chat viewer modes
 def viewerModeSelect(mode):
-    global editedOnly, viewerTimes, lastChatlogMode
+    global viewerSectionsOfSourceOnly, viewerTimes, lastChatlogMode
 
     # Preview uninterrupted original chatlog
     if mode == "Source Preview":
         lastChatlogMode = mode # Record mode as last selected:
-        editedOnly = False
+        viewerSectionsOfSourceOnly = False
         viewerRender(scrollTo="playhead")
+        tracksEmphasizeMode(isOutput=False)
         #viewerScroll(chatlogPlayheadValue)
 
     # Preview only current chatlog's sections
     elif mode == "Source's Sections Only":
         lastChatlogMode = mode # Record mode as last selected:
-        editedOnly = True
+        viewerSectionsOfSourceOnly = True
         viewerRender(scrollTo="playhead")
+        tracksEmphasizeMode(isOutput=False)
         #viewerScroll(chatlogPlayheadValue)
 
     # Preview output
-    elif mode == "Full Sections Output":
+    elif mode == "Section Editor Output":
         print(outputJumppoint)
         viewerRender(scrollTo=outputJumppoint)
+        tracksEmphasizeMode(isOutput=True)
         #viewerScroll(outputPlayheadValue)
     
 # Render the current chat row into "small caps" format
@@ -1585,7 +1593,7 @@ def viewerUpdateFont(font):
             "Defaults": ("Courier New", 11)
         }
 
-        if os.name != 'nt': # Is this not Windows?
+        if sys.platform == "darwin": # Is this Mac?
             fontDict.update({
                 "Sans-serif": ("Helvetica", 11),
                 "Monospace": ("Monaco", 10),
@@ -1596,9 +1604,9 @@ def viewerUpdateFont(font):
         viewerFont.configure(family=family, size=size)
 
         outputUseCache = False
-        viewerBuildOutput() #need to rebuild the output to force small caps on/off
+        viewerBuildOutputRows() #need to rebuild the output to force small caps on/off
 
-        if(viewerModeButtons.get() == "Full Sections Output"):
+        if(viewerModeButtons.get() == "Section Editor Output"):
             viewerTimes = outputTimes # Assign output times list to viewerTimes
         
         viewerRender(scrollTo="playhead")
@@ -1622,7 +1630,7 @@ def viewerFontReset():
 
         # ONLY FOR IF SWITCHED OFF, clone of this in UpdateViewerFont
         # Rebuild the correct viewer based on active mode
-        if viewerModeButtons.get() == "Full Sections Output":
+        if viewerModeButtons.get() == "Section Editor Output":
             viewerTimes = outputTimes
 
         viewerRender(scrollTo="playhead")
@@ -1643,7 +1651,7 @@ def tracksChatlogDragged():
     tracksUpdateTitles()
 
     # Return to last used non-output chatlog viewer.
-    if viewerModeButtons.get() == "Full Sections Output":
+    if viewerModeButtons.get() == "Section Editor Output":
         #print(lastChatlogMode)
         viewerModeButtons.set(lastChatlogMode)
         viewerModeSelect(lastChatlogMode)
@@ -1663,9 +1671,9 @@ def tracksOutputDragged():
     # Update timeline titles.
     tracksUpdateTitles()
     
-    if viewerModeButtons.get() != "Full Sections Output":
-        viewerModeButtons.set("Full Sections Output")
-        viewerModeSelect("Full Sections Output")
+    if viewerModeButtons.get() != "Section Editor Output":
+        viewerModeButtons.set("Section Editor Output")
+        viewerModeSelect("Section Editor Output")
 
     # If ANY messages exist IN THE VIEWER, 
     # scroll to playhead value. Should match output slider at this point.
@@ -1885,7 +1893,7 @@ viewerFrame.grid_rowconfigure(1, weight=1)
 #editedOnlyButton = customtkinter.CTkButton(master=viewerFrame, text="Show only sections", command=ToggleEditedOnly)
 #editedOnlyButton.grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
 
-viewerModeButtons = customtkinter.CTkSegmentedButton(master=viewerFrame, values=["Source Preview", "Source's Sections Only", "Full Sections Output"], command=viewerModeSelect)
+viewerModeButtons = customtkinter.CTkSegmentedButton(master=viewerFrame, values=["Source Preview", "Source's Sections Only", "Section Editor Output"], command=viewerModeSelect)
 viewerModeButtons.grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
 viewerModeButtons.grid_propagate(False)
 viewerModeButtons.set("Source Preview")
@@ -1970,13 +1978,44 @@ outputPlayheadText = timelines.create_text(50, 205, text="00:00:00", fill="white
 timelines.tag_raise(outputPlayheadLine)
 
 # Timeline Titles
-timelinesChatlogTitle = timelines.create_text(500, jsonLine - 55,
+timelinesChatlogTitle = customtkinter.CTkButton(
+    master=timelines,
+    text=f"Current Source",
+    font=("Roboto", 15),
+    width=360,
+    height=28,
+    corner_radius=14,
+    text_color="white",
+    fg_color="#3D3D3D",
+    border_color="#242424",
+    border_width=3,
+    command=lambda: viewerModeSelect(lastChatlogMode)
+)
+timelinesChatlogTitle.place(x=500, y=jsonLine - 60, anchor="center")
+
+timelinesOutputTitle = customtkinter.CTkButton(
+    master=timelines,
+    text=f"Section Editor Output",
+    font=("Roboto", 15),
+    width=360,
+    height=28,
+    corner_radius=14,
+    text_color="white",
+    hover_color="#1e5c2d",
+    fg_color="#3D3D3D",
+    border_color="#242424",
+    border_width=3,
+    command=lambda: viewerModeSelect("Section Editor Output")
+)
+timelinesOutputTitle.place(x=500, y=yttLine - 60, anchor="center")
+
+'''timelinesChatlogTitle = timelines.create_text(500, jsonLine - 55,
     text=f"Current Source: {int(chatlogPlayheadValue)}", 
     fill="white", font=("Roboto", 13), anchor="center")
 
 timelinesOutputTitle = timelines.create_text(500, yttLine - 55,
     text=f"Full Sections Output: {int(outputPlayheadValue)}",
-    fill="white", font=("Roboto", 13), anchor="center")
+    fill="white", font=("Roboto", 13), anchor="center")'''
 
 # Slider object for the chatlog timeline.
 timelinesChatlogSlider = customtkinter.CTkSlider(
@@ -2044,7 +2083,7 @@ def tracksRedraw():
     # Update displayed time.
     sectionTotalTime.configure(text=f"Total Time: {helpSecToString(getYTTDuration())}")
 
-'''    if viewerModeButtons.get() == "Full Sections Output":
+'''    if viewerModeButtons.get() == "Section Editor Output":
         viewerTimes = outputTimes
         viewerRenderOutput(keep=keep, scroll=scroll) # Refresh viewer if currently in output mode
     else:
@@ -2105,6 +2144,9 @@ def cleanup():
 
 atexit.register(cleanup)
 tracksRedraw()
+
+app.drop_target_register(DND_FILES)
+app.dnd_bind("<<Drop>>", importFileDrop)
 
 #--------------------------------------------------------------------------
 app.mainloop()  # Called at the end.
