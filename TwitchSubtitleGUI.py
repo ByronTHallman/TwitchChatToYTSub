@@ -114,7 +114,7 @@ TkinterDnD.require(app) # for the class wrapper
 
 app.geometry("1000x800")
 app.resizable(False, False) #The timelines sorta break if the window is resizable.
-app.title("Feal Like Crab")
+app.title("Twitch-Chat-to-Subtitles Editor")
 app.focus_force()
 
 # ICONS: Windows Icon
@@ -170,11 +170,12 @@ yttLine = 240       # The y values of the output timeline.
 chatlogPlayheadValue = 0      # Global variable storing first timeline playhead value for access.
 outputPlayheadValue = 0       # Global variable storing second timeline playhead value for access.
 rangeSliderValues = {}        # Global dict storing keys assigned TRIPLES representing slider range left, right handle values AND slide ranger length.
+rangeSpacerDefaults = 600     # Fixed value of 10 minutes for "ranges" to give spacers in order to make ranges useful when "selecting" the spacer "json". 12 hours still the actual max.
 
 # Viewer global variables
 viewerTimes = []                    # Stored message times for viewer interaction with sliders
 settingsSmallCaps = False           # Global check for if "Small Caps" font is enabled
-lastChatlogMode = "Source Preview"  # Keeps track of the last used chatlog source Viewer mode
+viewerFontCache = {}                # Caching the fonts fixes the glitching with the interface during font changes
 
 # Output global variables (to store viewer's output mode data)
 outputTimes = []             # Stores all OUTPUT message times, used for bisect searching section endpoints
@@ -423,6 +424,14 @@ def importDownloadURL():
             text="Paste the Twitch VOD URL below:",
             title="Import Twitch VOD form URL"
     )
+
+    # Move the prompt a just below the button
+    app.update_idletasks() #ask app to finish what it's doing first
+    x = max(0, app.winfo_x() + 10)
+    y = max(0, app.winfo_y() + 120)
+    dialog.geometry(f"+{x}+{y}")
+
+    # Initiate the dialog process
     vod_url = dialog.get_input()
 
     # Exit if canceled/left blank
@@ -735,6 +744,11 @@ def viewerGetMessageTime(message):
     # so time in "seconds" is the [0]th item.
     return message[0]
 
+def viewerToggleSectionsOnly():
+    global viewerSectionsOfSourceOnly
+    viewerSectionsOfSourceOnly = bool(viewerSectionsOnlySwitch.get())
+    viewerModeSelect("Source Preview")
+
 #Reads one comment and returns (seconds, name, body, color), or None if it can't be read.
 #Twitch json files use content_offset_seconds / commenter / message.body / message.user_color.
 #Chat-downloader style files use time_in_seconds / author / message (plain text) / author.colour.
@@ -951,7 +965,7 @@ def viewerRender(scrollTo="top", isEmpty=False):
 
     # == GLOBALS ==
     global viewerSection, viewerOutputSection, viewerTimes, outputPlayheadValue
-    isOutput = (viewerModeButtons.get() == "Section Editor Output")
+    isOutput = (viewerModeButtons.get() == "Output Preview")
     if not isOutput and isEmpty:
         print("LMAO ITS EMPTY")
         return
@@ -1087,30 +1101,22 @@ def viewerScroll(timelineSeconds):
 
 # For choosing chat viewer modes
 def viewerModeSelect(mode):
-    global viewerSectionsOfSourceOnly, viewerTimes, lastChatlogMode
+    global viewerSectionsOfSourceOnly, viewerTimes
 
     # Preview uninterrupted original chatlog
     if mode == "Source Preview":
-        lastChatlogMode = mode # Record mode as last selected:
-        viewerSectionsOfSourceOnly = False
+        if viewerModeButtons.get() != "Source Preview":
+            viewerModeButtons.set("Source Preview")
         viewerRender(scrollTo="playhead")
         tracksEmphasizeMode(isOutput=False)
-        #viewerScroll(chatlogPlayheadValue)
-
-    # Preview only current chatlog's sections
-    elif mode == "Source's Sections Only":
-        lastChatlogMode = mode # Record mode as last selected:
-        viewerSectionsOfSourceOnly = True
-        viewerRender(scrollTo="playhead")
-        tracksEmphasizeMode(isOutput=False)
-        #viewerScroll(chatlogPlayheadValue)
 
     # Preview output
-    elif mode == "Section Editor Output":
+    elif mode == "Output Preview":
+        if viewerModeButtons.get() != "Output Preview":
+            viewerModeButtons.set("Output Preview")
         print(outputJumppoint)
         viewerRender(scrollTo=outputJumppoint)
         tracksEmphasizeMode(isOutput=True)
-        #viewerScroll(outputPlayheadValue)
     
 # Render the current chat row into "small caps" format
 # using funny unicode characters
@@ -1123,6 +1129,12 @@ def viewerSmallCapsPass(text):
         return text.translate(caps_map)
     else:
         return text
+
+def getViewerFont(family, size):
+    key = (family, size)
+    if key not in viewerFontCache:
+        viewerFontCache[key] = tkfont.Font(family=family, size=size)
+    return viewerFontCache[key]
 
 # Goes to the viewer object and changes its font
 # based on what is chosen in settings
@@ -1154,12 +1166,15 @@ def viewerUpdateFont(font):
             })
 
         family, size = fontDict.get(font, fontDict["Defaults"])
-        viewerFont.configure(family=family, size=size)
+        #viewerFont.configure(family=family, size=size)
+
+        viewerFont = getViewerFont(family, size)
+        viewer.configure(font=viewerFont)
 
         outputUseCache = False
         viewerBuildOutputRows() #need to rebuild the output to force small caps on/off
 
-        if(viewerModeButtons.get() == "Section Editor Output"):
+        if(viewerModeButtons.get() == "Output Preview"):
             viewerTimes = outputTimes # Assign output times list to viewerTimes
         
         viewerRender(scrollTo="playhead")
@@ -1173,7 +1188,9 @@ def viewerFontReset():
     # If set OFF, then reset visualizer to default font.
     if fontPreview.get() == 0:
         #print("TURN OFF FONTS")
-        viewerFont.configure(family="Courier New", size=11)
+        #viewerFont.configure(family="Courier New", size=11)
+        viewerFont = getViewerFont("Courier New", 11)
+        viewer.configure(font=viewerFont)
         settingsSmallCaps = False
 
         outputUseCache = False
@@ -1181,7 +1198,7 @@ def viewerFontReset():
 
         # ONLY FOR IF SWITCHED OFF, clone of this in UpdateViewerFont
         # Rebuild the correct viewer based on active mode
-        if viewerModeButtons.get() == "Section Editor Output":
+        if viewerModeButtons.get() == "Output Preview":
             viewerTimes = outputTimes
 
         viewerRender(scrollTo="playhead")
@@ -1241,7 +1258,7 @@ def sectionValidEnds(start, end, maxEnd):
 
 def sectionCreate(isEmpty=False):
     global currentJson
-    #print(f"this is idiotic., whats the current json {currentJson}")
+    #print(f"whats the current json {currentJson}")
     #print(f"HEY IS ISEMPTY TRUE??? {isEmpty}")
 
     if isEmpty: #tempCurrentJson stores the last value of currentJson so that it can be restored after the empty section is created.
@@ -1266,9 +1283,9 @@ def sectionCreate(isEmpty=False):
             hourS = 0
             minS = 0
             secS = 0.0
-            hourE = int(hourEmpty.get() or "0")
-            minE = int(minEmpty.get() or "0")
-            secE = float(secEmpty.get() or "0")
+            hourE = int(hourSpacer.get() or "0")
+            minE = int(minSpacer.get() or "0")
+            secE = float(secSpacer.get() or "0")
 
     except ValueError:
         messagebox.showwarning("Invalid Input", "Please enter valid numbers for the timestamp.")
@@ -1343,6 +1360,21 @@ def sectionSelect(index, isEmpty=False):
         jsonHighlight()
         rangeSourceTitle.configure(text="Current Source: " + jsonData[currentJson]["name"])
 
+    # added this block for handling update buttons
+    if not isEmpty:
+        selected = sections[index]
+    if selected["jsonIndex"] == 0:
+        # Load spacer duration into the spacer boxes
+        rangeUpdateBoxes(hourSpacer, minSpacer, secSpacer, selected["end"] - selected["start"])
+    else:
+        # Load section start/end into the range slider and start/end boxes
+        rangeSlider.set((selected["start"], selected["end"]))
+        rangeMoveMarker(selected["start"], "left")
+        rangeMoveMarker(selected["end"], "right")
+        rangeUpdateBoxes(hourStart, minStart, secStart, selected["start"])
+        rangeUpdateBoxes(hourEnd, minEnd, secEnd, selected["end"])
+    #sectionSyncUpdateButtons()
+
     # == UPDATE TIMELINE, WHICH UPDATES VIEWER ==
     tracksRedraw()
     outputUseCache = False
@@ -1393,8 +1425,82 @@ def sectionDelete(index):
         viewerSection = currentSection
         sectionSelect(currentSection)
 
+'''
+def sectionSyncUpdateButtons():
+    if not sections or not (0 <= currentSection < len(sections)):
+        rangeUpdateButton.configure(state="disabled")
+        rangeSpacerUpdateButton.configure(state="disabled")
+        return
+
+    is_spacer = (sections[currentSection]["jsonIndex"] == 0)
+    rangeUpdateButton.configure(state="disabled" if is_spacer else "normal")
+    rangeSpacerUpdateButton.configure(state="normal" if is_spacer else "disabled")
+'''
+
+def sectionUpdate(isSpacer=False):
+    global currentJson, outputUseCache
+
+    if not sections or not (0 <= currentSection < len(sections)):
+        return
+
+    target = sections[currentSection]
+    target_is_spacer = (target["jsonIndex"] == 0)
+
+    # Guard against updating a spacer with section controls (or vice versa)
+    #if isSpacer != target_is_spacer:
+        #return
+
+    tempCurrentJson = currentJson
+    if isSpacer:
+        currentJson = 0
+        targetJson = 0
+    else:
+        # Use the currently active chatlog, or keep the section's original chatlog if on Spacer/none
+        targetJson = currentJson if currentJson > 0 else target["jsonIndex"]
+        currentJson = targetJson
+
+    try:
+        if not isSpacer:
+            hourS = int(hourStart.get() or "0")
+            minS = int(minStart.get() or "0")
+            secS = float(secStart.get() or "0")
+            hourE = int(hourEnd.get() or "0")
+            minE = int(minEnd.get() or "0")
+            secE = float(secEnd.get() or "0")
+        else:
+            hourS, minS, secS = 0, 0, 0.0
+            hourE = int(hourSpacer.get() or "0")
+            minE = int(minSpacer.get() or "0")
+            secE = float(secSpacer.get() or "0")
+    except ValueError:
+        currentJson = tempCurrentJson
+        messagebox.showwarning("Invalid Input", "Please enter valid numbers for the timestamp.")
+        return
+
+    start = helpStampToSec(hourS, minS, secS)
+    end = helpStampToSec(hourE, minE, secE)
+    maxEnd = jsonData[targetJson]["endTime"]
+
+    end = sectionValidEnds(start, end, maxEnd)
+    currentJson = tempCurrentJson
+    if end == 0:
+        return
+
+    # Update the section dictionary and its button label in sectionShelf
+    target["jsonIndex"] = targetJson
+    target["start"] = start
+    target["end"] = end
+    target["button"].configure(
+        text=f"{currentSection + 1} - {jsonData[targetJson]['name']}\n{helpSecToString(start)} - {helpSecToString(end)}"
+    )
+
+    # Invalidate output cache and refresh timelines + viewer
+    outputUseCache = False
+    tracksRedraw()
+    viewerRender(scrollTo="section")
+
 #--------------------------------------------------------------------------
-# SECTION EDITOR RANGE SLIDER FUNCTIONS
+# RANGE EDITOR SLIDER FUNCTIONS
 #--------------------------------------------------------------------------
 
 def rangeStore(rangeSlider, index):
@@ -1409,10 +1515,10 @@ def rangePull(index):
         rangeTriple = rangeSliderValues.get(index)      # Take STORED ranges if available
 
     elif -1 < index < len(jsonData):                    # Unstored?
-        endTime = jsonData[index].get("endTime", 100)   # get normal souce's endpoint, fallback to 100 if none exist
+        endTime = jsonData[index].get("endTime", rangeSpacerDefaults)   # get normal souce's endpoint, fallback to 100 if none exist
 
         if jsonData[index].get("path") is None:         # check if pulled source is a spacer
-            endTime = min(endTime, 1800)                # spacer ranges visualize to only 30 minutes
+            endTime = min(endTime, rangeSpacerDefaults) # spacer ranges visualize to only 30 minutes
 
         rangeTriple = (0, endTime, endTime)
     else:
@@ -1440,8 +1546,8 @@ def rangeManagement(index):
             
             if isEmpty:
                 print("it's empty!!!!")
-                rangeLimit = 900
-                rangeRight = 900
+                rangeLimit = rangeSpacerDefaults
+                rangeRight = rangeSpacerDefaults
 
             #3. set the sliders in the right place. and markers
             rangeSlider.configure(to=rangeLimit)      # set limit
@@ -1462,7 +1568,7 @@ def rangeManagement(index):
         if index < len(jsonData):
             print("rangemanagement here, hey your index is less than jsonData length")
             if jsonData[index].get("path") == None: # is it a spacer?
-                endTime = 900
+                endTime = rangeSpacerDefaults
             else:
                 endTime = jsonData[index].get("endTime", 100) #first JSON is a special case
         else:
@@ -1513,17 +1619,17 @@ def rangeUpdateBoxes(hr_box, min_box, sec_box, sliderValue):
 def rangeUpdateSpacer():
     start_sec, end_sec = rangeSlider.get()
     total_sec = max(0, int(end_sec) - int(start_sec))
-    rangeUpdateBoxes(hourEmpty, minEmpty, secEmpty, total_sec)
+    rangeUpdateBoxes(hourSpacer, minSpacer, secSpacer, total_sec)
 
 # Initiates changes to the entry boxes
 # depending on range slider positions
 def rangeSliderDragged(sliderValue, side):
-    global lastChatlogMode, chatlogPlayheadValue
+    global chatlogPlayheadValue
 
     # If in output, activate last used chatlog mode
-    if viewerModeButtons.get() == "Section Editor Output":
-        viewerModeButtons.set(lastChatlogMode)
-        viewerModeSelect(lastChatlogMode)
+    if viewerModeButtons.get() == "Output Preview":
+        viewerModeButtons.set("Source Preview")
+        viewerModeSelect("Source Preview")
 
     #sliderMin, sliderMax = values
 
@@ -1657,10 +1763,9 @@ def tracksChatlogDragged():
     chatlogPlayheadValue = tracksUpdatePlayhead(timelinesChatlogSlider, chatlogPlayheadLine, jsonLine, chatlogPlayheadText, endTime)
 
     # Return to last used non-output chatlog viewer.
-    if viewerModeButtons.get() == "Section Editor Output":
-        #print(lastChatlogMode)
-        viewerModeButtons.set(lastChatlogMode)
-        viewerModeSelect(lastChatlogMode)
+    if viewerModeButtons.get() == "Output Preview":
+        viewerModeButtons.set("Source Preview")
+        viewerModeSelect("Source Preview")
 
     # If ANY messages exist IN THE VIEWER, 
     # scroll to playhead value. Should match chatlog slider at this point.
@@ -1674,9 +1779,9 @@ def tracksOutputDragged():
     outputPlayheadValue = tracksUpdatePlayhead(timelinesOutputSlider, outputPlayheadLine, yttLine, outputPlayheadText, getYTTDuration())
     outputJumppoint = "playhead" # switching modes will emphasize playhead
     
-    if viewerModeButtons.get() != "Section Editor Output":
-        viewerModeButtons.set("Section Editor Output")
-        viewerModeSelect("Section Editor Output")
+    if viewerModeButtons.get() != "Output Preview":
+        viewerModeButtons.set("Output Preview")
+        viewerModeSelect("Output Preview")
 
     # If ANY messages exist IN THE VIEWER, 
     # scroll to playhead value. Should match output slider at this point.
@@ -1723,8 +1828,43 @@ def tracksRedraw():
 
     tracksRefreshPlayheads()
 
-    # Update displayed time.
+    # Update displayed time in the Section Editor. 
+        # Maybe this call flow should be moved somewhere else, alas.
     sectionTotalTime.configure(text=f"Total Time: {helpSecToString(getYTTDuration())}")
+
+#--------------------------------------------------------------------------
+# SETTINGS
+#--------------------------------------------------------------------------
+
+def settingsOpen():
+    # Force Tkinter to finish what it's doing
+    app.update_idletasks()
+
+    # Tells OS that this popup belongs to TwitchSubtitleGUI
+    settingsWindow.transient(app)
+
+    # Let Windows finish rebuilding outer window before grabbing the handle
+    settingsWindow.update_idletasks()
+
+    # Get rid of weird bug where the window bar will flash to white first
+    if sys.platform == "win32":
+        windowHandle = ctypes.windll.user32.GetParent(settingsWindow.winfo_id())
+        value = ctypes.c_int(1)
+        for attr in (20, 19):
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(windowHandle, attr, ctypes.byref(value), ctypes.sizeof(value)) == 0:
+                break
+
+    # move popup somewhere relevant
+    x = app.winfo_x() + 700
+    y = app.winfo_y() + 125
+    settingsWindow.geometry(f"+{x}+{y}")
+
+    # Reveal the window
+    settingsWindow.deiconify()
+
+    # Just wait
+    settingsWindow.after(50, settingsWindow.lift)
+    settingsWindow.after(50, settingsWindow.focus_force)
 
 #--------------------------------------------------------------------------
 #----------------------------- INITIALIZE UI ------------------------------
@@ -1781,12 +1921,6 @@ rightSide.grid_rowconfigure(2, weight=1)
 exportButton = customtkinter.CTkButton(master=rightSide, text="Export Subtitles", font = ("Roboto", 14), command=exportYTT, fg_color="#2b7a3d", hover_color="#1e5c2d")
 exportButton.grid(row=0, column=0, padx=5, pady=5, sticky="new")
 
-#settingsButton. doesn't do anything yet
-# TODO: make this do anything lol
-# intended to make a popup
-settingsButton = customtkinter.CTkButton(master=rightSide, text="Settings", font = ("Roboto", 14), fg_color="#7a5e2b", hover_color="#5c481e")
-settingsButton.grid(row=1, column=0, padx=5, pady=5, sticky="new")
-
 #sectionShelf. Where the user reorganizes the order of JSON sections.
 # Change: renamed this to "shelf" to match json list on the left
 sectionShelf = customtkinter.CTkScrollableFrame(master=rightSide)
@@ -1809,45 +1943,78 @@ sectionShifterButtons.grid(row=3, column=0, padx=10, pady=(2, 10), sticky="ew")
 sectionShifterButtons.grid_rowconfigure(0, weight=1)
 
 shiftUpButton = customtkinter.CTkButton(master=sectionShifterButtons, text="▲", font = ("Roboto", 18), command=callUp, width=40)
-shiftUpButton.grid(row=0, column=0, padx=(65, 3), pady=5, sticky="ns")
+shiftUpButton.grid(row=0, column=0, padx=(38, 3), pady=5, sticky="ns")
 shiftDownButton = customtkinter.CTkButton(master=sectionShifterButtons, text="▼", font = ("Roboto", 18), command=callDown, width=40)
 shiftDownButton.grid(row=0, column=1, padx=3, pady=5, sticky="ns")
-shiftDownButton = customtkinter.CTkButton(master=sectionShifterButtons, text="⌫", font = ("Roboto", 14), command=callDelete, width=40)
-shiftDownButton.grid(row=0, column=2, padx=3, pady=5, sticky="ns")
+shiftDeleteButton = customtkinter.CTkButton(master=sectionShifterButtons, text="⌫", font = ("Roboto", 14), command=callDelete, width=40)
+shiftDeleteButton.grid(row=0, column=2, padx=3, pady=5, sticky="ns")
+shiftUpdateButton = customtkinter.CTkButton(master=sectionShifterButtons, text="✎", font = ("Roboto", 14), command=sectionUpdate, width=40)
+shiftUpdateButton.grid(row=0, column=3, padx=3, pady=5, sticky="ns")
 
 #----------------------------------------------------------------------------------------------
 #subtitle settings
-settingsBox = customtkinter.CTkFrame(master=rightSide)
+
+settingsWindow = customtkinter.CTkToplevel(app)
+settingsWindow.title("Subtitle Settings")
+settingsWindow.withdraw()
+settingsWindow.resizable(False, False)
+settingsWindow.protocol("WM_DELETE_WINDOW", settingsWindow.withdraw)
+
+settingsBox = customtkinter.CTkFrame(master=settingsWindow, width=272, height=172)
+settingsBox.pack(fill="both", expand=True, padx=10, pady=10)
+settingsBox.grid_columnconfigure(1, weight=1)
+settingsBox.grid_propagate(False)
+
+settingsButton = customtkinter.CTkButton(master=rightSide, text="Settings", font = ("Roboto", 14), fg_color="#7a5e2b", hover_color="#5c481e", command=settingsOpen)
+settingsButton.grid(row=1, column=0, padx=5, pady=5, sticky="new")
+
+'''settingsBox = customtkinter.CTkFrame(master=rightSide)
 settingsBox.grid(row=5, column=0, padx=10, pady=(0, 10), sticky="ew")
 settingsBox.grid_columnconfigure(1, weight=1)
+'''
 
-settingsTitle = customtkinter.CTkLabel(master=settingsBox, text="Subtitle Settings", font=("Roboto", 11))
-settingsTitle.grid(row=0, column=0, columnspan=2, padx=15, pady=(4, 2), sticky="w")
+# independent fixed column frames so control redraws cannot shift labels
+settingsLabels = customtkinter.CTkFrame(master=settingsBox, fg_color="transparent", width=136, height=180)
+settingsLabels.grid(row=0, column=0, padx=(2, 6), pady=6, sticky="ns")
+settingsLabels.grid_propagate(False)
+settingsLabels.grid_columnconfigure(0, weight=1)
+
+settingsControls = customtkinter.CTkFrame(master=settingsBox, fg_color="transparent", width=134, height=180)
+settingsControls.grid(row=0, column=1, padx=(0, 8), pady=6, sticky="ns")
+settingsControls.grid_propagate(False)
+settingsControls.grid_columnconfigure(0, weight=1)
+
+for r in range(5):
+    settingsLabels.grid_rowconfigure(r, minsize=34)
+    settingsControls.grid_rowconfigure(r, minsize=34)
 
 #font and size options
-fontPreview = customtkinter.CTkSwitch(master=settingsBox, text="Preview Font", command=viewerFontReset)
-fontPreview.grid(row=0, column=1, padx=20, pady=2, sticky="e")
+customtkinter.CTkLabel(master=settingsLabels, text="Preview Font:").grid(row=0, column=0, padx=(8, 4), pady=2, sticky="w")
+fontPreview = customtkinter.CTkSwitch(master=settingsControls, text="", command=viewerFontReset)
+fontPreview.grid(row=0, column=0, padx=0, pady=2, sticky="w")
 
-customtkinter.CTkLabel(master=settingsBox, text="Font:").grid(row=1, column=0, padx=(8, 4), pady=2, sticky="e")
-fontOption = customtkinter.CTkOptionMenu(master=settingsBox, values=["Sans-serif", "Serif", "Monospace", "Casual", "Cursive", "Small Caps"], height=24, command=viewerUpdateFont)
-fontOption.grid(row=1, column=1, padx=(0, 8), pady=2, sticky="ew")
+customtkinter.CTkLabel(master=settingsLabels, text="Font:").grid(row=1, column=0, padx=(8, 4), pady=2, sticky="w")
+fontOption = customtkinter.CTkOptionMenu(master=settingsControls, values=["Sans-serif", "Serif", "Monospace", "Casual", "Cursive", "Small Caps"], height=24, command=viewerUpdateFont)
+fontOption.grid(row=1, column=0, padx=(0, 8), pady=2, sticky="w")
 fontOption.set("Sans-serif")
 
-customtkinter.CTkLabel(master=settingsBox, text="Size:").grid(row=2, column=0, padx=(8, 4), pady=2, sticky="e")
-fontSize = customtkinter.CTkEntry(master=settingsBox, placeholder_text="10", height=24)
+customtkinter.CTkLabel(master=settingsLabels, width=25, height=25, text="Text Size:").grid(row=2, column=0, padx=(8, 4), pady=2, sticky="w")
+fontSize = customtkinter.CTkEntry(master=settingsControls, placeholder_text="10", height=24)
 fontSize.insert(0, "10")
-fontSize.grid(row=2, column=1, padx=(0, 8), pady=2, sticky="ew")
+fontSize.grid(row=2, column=0, padx=(0, 8), pady=2, sticky="w")
 
 #duration and opacity options
-customtkinter.CTkLabel(master=settingsBox, text="Opacity:").grid(row=3, column=0, padx=(8, 4), pady=2, sticky="e")
-opacityOptions = customtkinter.CTkSlider(master=settingsBox, from_=0, to=100, number_of_steps=100, height=14)
+customtkinter.CTkLabel(master=settingsLabels, text="Opacity:").grid(row=3, column=0, padx=(8, 4), pady=2, sticky="w")
+opacityOptions = customtkinter.CTkSlider(master=settingsControls, from_=0, to=100, number_of_steps=100, height=14)
 opacityOptions.set(100)
-opacityOptions.grid(row=3, column=1, padx=(0, 8), pady=2, sticky="ew")
+opacityOptions.grid(row=3, column=0, padx=(0, 8), pady=2, sticky="w")
 
-customtkinter.CTkLabel(master=settingsBox, text="Wait:").grid(row=4, column=0, padx=(8, 4), pady=(2, 6), sticky="e")
-durationOptions = customtkinter.CTkEntry(master=settingsBox, placeholder_text="10", height=24)
+customtkinter.CTkLabel(master=settingsLabels, text="Message Duration:").grid(row=4, column=0, padx=(8, 4), pady=(2, 6), sticky="w")
+durationOptions = customtkinter.CTkEntry(master=settingsControls, placeholder_text="10", height=24)
 durationOptions.insert(0, "10")
-durationOptions.grid(row=4, column=1, padx=(0, 8), pady=(2, 6), sticky="ew")
+durationOptions.grid(row=4, column=0, padx=(0, 8), pady=(2, 6), sticky="w")
+
+settingsWindow.resizable(False, False)
 
 #--------------------------------------------------------------------------
 #rangeBox. Where the user adds a new JSON section to the sectionEditor.
@@ -1904,26 +2071,40 @@ rangeSlider.grid(row=3, column=0, padx=5, pady=2, sticky="ew")
 rangeCreateButton = customtkinter.CTkButton(master=timeEntry, text="Create Section", command=lambda: sectionCreate())
 rangeCreateButton.grid(row=0, column=11, padx=5, pady=(5,3), sticky="n")
 
-emptyCreator = customtkinter.CTkFrame(master=rangeBox)
-emptyCreator.grid(row=5, column=0, padx=1, pady=1, sticky="n")
-emptyCreator.grid_rowconfigure(0, weight=1)
+#rangeUpdateButton = customtkinter.CTkButton(master=rangeUpdateButtonFrame, width=50, fg_color="#74456B", hover_color="#4E3149", text="Update Section", command=lambda: sectionUpdate(isSpacer=False))
+#rangeUpdateButton.grid(row=0, column=0, padx=1, pady=(5,3), sticky="n",)
 
-hourEmpty = customtkinter.CTkEntry(emptyCreator, placeholder_text="h")
-hourEmpty.grid(row=0, column=0, padx=(5, 0), pady=5, sticky="n")
-hourEmpty.configure(width=30, justify="center")
-hmemColon = customtkinter.CTkLabel(master = emptyCreator, text=":")
-hmemColon.grid(row=0, column=1, padx=(2, 2.1), pady=5)
-minEmpty = customtkinter.CTkEntry(emptyCreator, placeholder_text="m")
-minEmpty.grid(row=0, column=2, pady=5, sticky="n")
-minEmpty.configure(width=30, justify="center")
-msemColon = customtkinter.CTkLabel(master = emptyCreator, text=":")
-msemColon.grid(row=0, column=3, padx=(2, 2.1), pady=5)
-secEmpty = customtkinter.CTkEntry(emptyCreator, placeholder_text="s")
-secEmpty.grid(row=0, column=4, pady=5, sticky="n")
-secEmpty.configure(width=30, justify="center")
+spacerCreator = customtkinter.CTkFrame(master=rangeBox)
+spacerCreator.grid(row=5, column=0, padx=1, pady=1, sticky="n")
+spacerCreator.grid_rowconfigure(0, weight=1)
 
-rangeEmptyButton = customtkinter.CTkButton(master=emptyCreator, text="Create Spacer", command=lambda: sectionCreate(isEmpty=True))
-rangeEmptyButton.grid(row=0, column=5, padx=5, pady=5)
+hourSpacer = customtkinter.CTkEntry(spacerCreator, placeholder_text="h")
+hourSpacer.grid(row=0, column=1, padx=(5, 0), pady=5, sticky="n")
+hourSpacer.configure(width=30, justify="center")
+hmemSpacer = customtkinter.CTkLabel(master = spacerCreator, text=":")
+hmemSpacer.grid(row=0, column=2, padx=(2, 2.1), pady=5)
+minSpacer = customtkinter.CTkEntry(spacerCreator, placeholder_text="m")
+minSpacer.grid(row=0, column=3, pady=5, sticky="n")
+minSpacer.configure(width=30, justify="center")
+msemSpacer = customtkinter.CTkLabel(master = spacerCreator, text=":")
+msemSpacer.grid(row=0, column=4, padx=(2, 2.1), pady=5)
+secSpacer = customtkinter.CTkEntry(spacerCreator, placeholder_text="s")
+secSpacer.grid(row=0, column=5, pady=5, sticky="n")
+secSpacer.configure(width=30, justify="center")
+
+'''spacerCreateButtonFrame = customtkinter.CTkFrame(master=spacerCreator, width=100, height=25)
+spacerCreateButtonFrame.grid(row=0, column=6, padx=0, pady=0, sticky="nesw")
+spacerCreateButtonFrame.grid_propagate(False)'''
+
+spacerCreateButton = customtkinter.CTkButton(master=spacerCreator, width=50, text="Create Spacer", command=lambda: sectionCreate(isEmpty=True))
+spacerCreateButton.grid(row=0, column=6, padx=5, pady=5)
+
+#rangeSpacerUpdateButtonFrame = customtkinter.CTkFrame(master=spacerCreator, width=100, height=25)
+#rangeSpacerUpdateButtonFrame.grid(row=0, column=0, padx=0, pady=0, sticky="nesw")
+#rangeSpacerUpdateButtonFrame.grid_propagate(False)
+
+#rangeSpacerUpdateButton = customtkinter.CTkButton(master=rangeSpacerUpdateButtonFrame, width=50, fg_color="#74456B", hover_color="#4E3149", text="Update Spacer", command=lambda: sectionUpdate(isSpacer=True))
+#rangeSpacerUpdateButton.grid(row=0, column=0, padx=5, pady=5)
 
 #--------------------------------------------------------------------------
 #Middle Section Scroller. The chatlog viewer. Its scrollbar is its own and is NOT connected to any slider as of right now.
@@ -1939,13 +2120,21 @@ viewerFrame.grid_rowconfigure(1, weight=1)
 #editedOnlyButton = customtkinter.CTkButton(master=viewerFrame, text="Show only sections", command=ToggleEditedOnly)
 #editedOnlyButton.grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
 
-viewerModeButtons = customtkinter.CTkSegmentedButton(master=viewerFrame, values=["Source Preview", "Source's Sections Only", "Section Editor Output"], command=viewerModeSelect)
-viewerModeButtons.grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+viewerModeBar = customtkinter.CTkFrame(master=viewerFrame, fg_color="transparent")
+viewerModeBar.grid(row=0, column=0, columnspan=2, padx=5, pady=0, sticky="ew")
+viewerModeBar.grid_columnconfigure(0, weight=1)
+
+viewerModeButtons = customtkinter.CTkSegmentedButton(master=viewerModeBar, values=["Source Preview", "Output Preview"], command=viewerModeSelect)
+viewerModeButtons.grid(row=0, column=0, padx=(5, 25), pady=5, sticky="ew")
 viewerModeButtons.grid_propagate(False)
 viewerModeButtons.set("Source Preview")
 
-viewerTimeFont = tkfont.Font(family="Courier New", size=11) #This doesn't change: font for the timecodes.
-viewerFont = tkfont.Font(family="Courier New", size=11) #Monospace so the timestamp column lines up
+viewerSectionsOnlySwitch = customtkinter.CTkSwitch(master=viewerModeBar, text="Sections Only", bg_color="transparent", command=viewerToggleSectionsOnly)
+viewerSectionsOnlySwitch.grid(row=0, column=1, padx=(0, 25), sticky="w")
+
+# Fonts
+viewerTimeFont = tkfont.Font(family="Courier New", size=11) # This never changes: font for the timecodes (and section headers).
+viewerFont = tkfont.Font(family="Courier New", size=11)     # Monospace so the timestamp column lines up
 
 #The text box is created first, so the scrollbar can be connected to it directly.
 viewer = tkinter.Text(
@@ -1970,17 +2159,11 @@ viewerScrollbar.grid(row=1, column=1, padx=(0, 5), pady=(0, 5), sticky="ns")
 viewer.configure(yscrollcommand=viewerScrollbar.set)
 
 # Define tag definitions. Short for optimization reasons?
-# Tag for time in seconds.
-viewer.tag_config("timestamp", foreground="#6fa8dc", font=viewerTimeFont)
-# Tag for messages outside of any section.
-viewer.tag_config("out", foreground="#8a8a8a")
-# Tag for messages long enough to be hanging.
-viewer.tag_config("hang", lmargin2=viewerFont.measure("0") * (outputStampWidth + 2))
-# Tag for section start labels.
-viewer.tag_config("st")
-# Tag for highlighted messages under scroll
-viewer.tag_config("active_highlight", background="#0a0a0a")
-viewer.tag_config("header", foreground="#ffffff", font=viewerTimeFont)
+viewer.tag_config("timestamp", foreground="#6fa8dc", font=viewerTimeFont)           # Tag for time in seconds.
+viewer.tag_config("out", foreground="#8a8a8a")                                      # Tag for messages outside of any section.
+viewer.tag_config("hang", lmargin2=viewerFont.measure("0") * (outputStampWidth + 2))  # Tag to define distance from the left side
+viewer.tag_config("active_highlight", background="#0a0a0a")                         # Tag for highlighted messages under scroll
+viewer.tag_config("header", foreground="#ffffff", font=viewerTimeFont)              # Tag for output mode "section start" headers
 
 #--------------------------------------------------------------------------
 #Timelines. Where the currently selected JSON's timeline is displayed, and where the total YTT section view is displayed.
@@ -2030,13 +2213,13 @@ timelinesChatlogTitle = customtkinter.CTkButton(
     fg_color="#3D3D3D",
     border_color="#242424",
     border_width=3,
-    command=lambda: viewerModeSelect(lastChatlogMode))
+    command=lambda: viewerModeSelect("Source Preview"))
 timelinesChatlogTitle.place(x=500, y=jsonLine - 60, anchor="center")
 
 # Timeline output title
 timelinesOutputTitle = customtkinter.CTkButton(
     master=timelines,
-    text=f"Section Editor Output",
+    text=f"Output Preview",
     font=("Roboto", 15),
     width=360,
     height=28,
@@ -2046,7 +2229,7 @@ timelinesOutputTitle = customtkinter.CTkButton(
     fg_color="#3D3D3D",
     border_color="#242424",
     border_width=3,
-    command=lambda: viewerModeSelect("Section Editor Output"))
+    command=lambda: viewerModeSelect("Output Preview"))
 timelinesOutputTitle.place(x=500, y=yttLine - 60, anchor="center")
 
 # Slider object for the chatlog timeline.
