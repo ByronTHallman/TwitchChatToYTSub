@@ -7,6 +7,7 @@ import tempfile  # tempfiles for downloaded jsons
 import bisect    # for searching message rows
 import random    # for random colors
 import threading # important for downloading
+import queue     # for queueing multiple downloads
 import json      # used to parse json files
 import re        # used to identify chatter name colors from the json (viewerParseComment)
 import tkinter   # used for viewer module
@@ -19,6 +20,7 @@ from pathlib import Path                    # filepaths for tempfiles, json labe
 # Third Party Imports
 import customtkinter                            # the basis for this entire GUI
 from CTkRangeSlider import *                    # range sliders for
+from CTkToolTip import *                        # tooltips for shifter buttons!
 from tkinterdnd2 import DND_FILES, TkinterDnD   # for dragging and dropping files as import method
 from chat_downloader import ChatDownloader      # for downloading from twitch urls directly NOTE: SPECIFICALLY Indigo128's fork, as Xenova's does <<NOT>> work
 
@@ -114,7 +116,7 @@ TkinterDnD.require(app) # for the class wrapper
 
 app.geometry("1000x800")
 app.resizable(False, False) #The timelines sorta break if the window is resizable.
-app.title("Twitch-Chat-to-Subtitles Editor")
+app.title("TwitchChatSubber")
 app.focus_force()
 
 # ICONS: Windows Icon
@@ -185,6 +187,15 @@ outputStampWidth = 0         # Cached timestamp column width
 outputFirstRows = {}         # Cached tacks section starting times
 outputUseCache = False       # IF CALLED TRUE, tells viewerBuildOutput to use the above cached values or rebuild them from scratch.
 outputJumppoint = "playhead" # Determines whether user last touched Output timeline playhead, or sections shelf. Determines what Viewer displays when returning to Output mode.
+
+# Import related global variables
+importState = {             # Holds state for queued URL downloads
+    "queue": queue.Queue(),     # Holds vod_url, card tuples
+    "running": False,           # Flag preventing multiple background download workers from spawning
+                                    # False: No current download; True: There is a download happening
+    "lock": threading.Lock(),   # Prevent simultaneous changes to the running flag
+                                    # Unlocked: Safe to change "running" state; Locked: Another thread checking "running"
+    "pending": []}              # List of placeholder CTkButton cards
 
 # Tempfile global variables
 tempDownloads = [] #Any file downloaded by URL will be added to this list to be removed on shutdown
@@ -325,6 +336,14 @@ def downloaderCheckDuration(comments, duration):
 # IMPORTS 
 #--------------------------------------------------------------------------
 
+# If a card fails and disappears while another file is added, card positions need to be re-sorted
+# Otherwise large gaps appear
+def importSortPending():
+    for cardNum, card in enumerate(importState["pending"], start=1):
+        if card.winfo_exists():
+            card.grid(row=(len(jsonData) - 1) + cardNum, column=0, padx=5, pady=2, sticky="ew")
+
+# Allows user to drag and drop files in!
 def importFileDrop(event):
     dropped_files = app.tk.splitlist(event.data)
 
@@ -348,7 +367,7 @@ def importFileJSON(droppedFile=None):
         state="disabled",  # Prevent clicking while loading
         fg_color="#374c64"  # Greyer color for loading state
     )
-    jsonCard.grid(row=len(jsonData) + 1, column=0, padx=5, pady=2, sticky="ew")
+    jsonCard.grid(row=len(jsonData) + len(importState["pending"]), column=0, padx=5, pady=2, sticky="ew")
 
     # Prompt user for JSON.
     if promptUser:
@@ -393,6 +412,9 @@ def importFileJSON(droppedFile=None):
 
     # Attach this JSON to the chain of chatlog information.
     jsonData.append({"path":filePath, "name":json_label, "endTime":duration, "button": jsonCard})
+    jsonCard.grid(row=len(jsonData) - 1, column=0, padx=5, pady=2, sticky="ew")
+    importSortPending()
+
     if len(jsonData) > 1:
         #print(len(jsonData) - 1)
         jsonSelect(len(jsonData) - 1)
@@ -414,9 +436,10 @@ def importFileJSON(droppedFile=None):
 
     viewerModeSelect(viewerModeButtons.get())
 
-# This works now. Make sure to build with
+# NOTE: Make sure to build ChatDownloader with
 # this specific build of chat-downloader.
 # pip install git+https://github.com/Indigo128/chat-downloader.git@all_current_fixes
+
 def importDownloadURL():
 
     # Prompt user for URL
@@ -431,135 +454,218 @@ def importDownloadURL():
     y = max(0, app.winfo_y() + 120)
     dialog.geometry(f"+{x}+{y}")
 
-    # Initiate the dialog process
-    vod_url = dialog.get_input()
-
-    # Exit if canceled/left blank
-    if not vod_url:
+    # Initiate the dialog process. Abort if nothing input or cancelled.
+    urlInput = dialog.get_input()
+    if urlInput is None:
         return
 
-    # Create a placeholder "Downloading..." card
-    # (Updated after successful download.)
-    urlCard = customtkinter.CTkButton(
-        master=jsonShelf,
-        text="Downloading...\n0%",
-        state="disabled",   # Prevent clicking while loading
-        fg_color="#644040"  # Greyer color for loading state
-    )
-    urlCard.grid(row=len(jsonData)+1, column=0, padx=5, pady=2, sticky="ew")
+    # Separate out any URLs in case there are multiple!
+    def parseURLs(vod_urls):
+        pattern = r'(?:https?://|www\.|clips\.twitch\.tv/|twitch\.tv/)(?:(?!(?:https?://|www\.|clips\.twitch\.tv/|twitch\.tv/))[^\s,])+'
+        return re.findall(pattern, vod_urls, flags=re.IGNORECASE)
+
+    # Sort input into a list format
+    urlList = parseURLs(urlInput)
+    urlCount = len(urlList)
+    urlCards = []
+    if not urlList: # If nothing was input, report to user.
+        messagebox.showwarning("Import Failed", "Please enter a valid Twitch VOD or Clip URL.")
+        return
+
+    # Create placeholder cards
+    for num, url, in enumerate(urlList, start=1):
+        text = f"Downloading...\n0%"
+        urlCard = customtkinter.CTkButton(
+            master=jsonShelf,
+            text=f"{text}\n0%",
+            state="disabled",
+            fg_color="#644040"
+        )
+        # Add pending card to list of pending cards
+        importState["pending"].append(urlCard)
+
+        if len(importState["pending"]) > 1:
+            urlCard.configure(text="Download Queued...")
+
+        # Place card in jsonShelf appropriate row
+        urlCard.grid(row=(len(jsonData) - 1) + len(importState["pending"]), column=0, padx=5, pady=2, sticky="ew")
+
+        # Add current card to queue of downloads
+        importState["queue"].put((url, urlCard))
+
+    # Initiate downloader loop only if one isn't already running
+    with importState["lock"]:
+        if importState["running"]:
+            return
+        importState["running"] = True
 
     # Inner function for downloading via ChatDownloader library.
-    def download():
-        # Attempt to download chatlog via URL input.
+    def downloadLoop():
         try:
-            # == DOWNLOAD GENERATOR INIT ==
-            # Download chat "generator"(?) object using ChatDownloader library.
-            vod_chat = ChatDownloader().get_chat(vod_url)
+            while True:                 # Keep going until empty queue
+                try:
+                    vod_url, urlCard = importState["queue"].get_nowait()
+                except queue.Empty:
+                    with importState["lock"]:
+                        if importState["queue"].empty():
+                            importState["running"] = False  #race condition garbage
+                            break
+                    continue
 
-            # == RAISE EXCEPTIONS ==
-            # -----------------------------------------------------------
-            # Raw username links lock up Chat Downloader.
-            # Don't let them do that!!!
-            if getattr(vod_chat, 'status', '') in ['live', 'upcoming']:
-                raise NonMediaError()
-            
-            # Check the first message and STORE it, 
-            # Messages are otherwise LOST due to how "generator"  
-            # objects like "chat_downloader.sites.common.Chat" work.
-            try:
-                first_message = next(vod_chat)
-            except StopIteration: #Nothing found, stop.
-                raise EmptyChatError()
-            # -----------------------------------------------------------
+                # Update next-up card
+                app.after(0, lambda card=urlCard: card.configure(text="Downloading...\n0%"))
+                
+                try:
+                    # == DOWNLOAD GENERATOR INIT ==
+                    # Download chat "generator"(?) object using ChatDownloader library.
+                    vod_chat = ChatDownloader().get_chat(vod_url)
 
-            #  == LABEL ==
-            # Get metadata for label information.
-            vod_metadata = importQueryVOD(vod_chat, first_message) #metadata dict
-            vod_label = downloaderWriteLabel(vod_metadata, vod_chat) #label string
-            vod_duration = vod_metadata.get('duration', 0) #shortens stuff later
+                    # == RAISE EXCEPTIONS ==
+                    # -----------------------------------------------------------
+                    # Raw username links lock up Chat Downloader.
+                    # Don't let them do that!!!
+                    if getattr(vod_chat, 'status', '') in ['live', 'upcoming']:
+                        raise NonMediaError()
+                    
+                    # Check the first message and STORE it, 
+                    # Messages are otherwise LOST due to how "generator"  
+                    # objects like "chat_downloader.sites.common.Chat" work.
+                    try:
+                        first_message = next(vod_chat)
+                    except StopIteration: #Nothing found, stop.
+                        raise EmptyChatError()
+                    # -----------------------------------------------------------
 
-            # == INIT TEMPFILE ==
-            # Create tempfile for storing the downloaded JSON with a relevant ID.
-            vod_id = downloaderWriteID(vod_url)
-            vod_tempfile = str(Path(tempDir) / f"temp_chat_{vod_id}.json")
-            tempDownloads.append(vod_tempfile)
+                    #  == LABEL ==
+                    # Get metadata for label information.
+                    vod_metadata = importQueryVOD(vod_chat, first_message) #metadata dict
+                    vod_label = downloaderWriteLabel(vod_metadata, vod_chat) #label string
+                    vod_duration = vod_metadata.get('duration', 0) #shortens stuff later
 
-            # Format JSON comments into expected format for converter.
-            downloaded_comments = [downloaderFormatComment(first_message)]
-            for vod_message in vod_chat:
-                # Formatted comment info, get time for %
-                comment = downloaderFormatComment(vod_message)
-                time = comment.get("content_offset_seconds")
+                    # == INIT TEMPFILE ==
+                    # Create tempfile for storing the downloaded JSON with a relevant ID.
+                    vod_id = downloaderWriteID(vod_url)
+                    vod_tempfile = str(Path(tempDir) / f"temp_chat_{vod_id}.json")
+                    tempDownloads.append(vod_tempfile)
 
-                # Append comment to new list
-                downloaded_comments.append(comment)
+                    # Format JSON comments into expected format for converter.
+                    downloadedComments = [downloaderFormatComment(first_message)]
+                    lastPercent = -1
+                    for vod_message in vod_chat:
+                        # Formatted comment info, get time for %
+                        comment = downloaderFormatComment(vod_message)
+                        time = comment.get("content_offset_seconds")
 
-                # Update "Downloading..." card to represent download progress.
-                percent = int(time / vod_duration * 100) if vod_duration > 0 else 0
-                urlCard.configure(text=f"Downloading...\n{percent}%")
+                        # Append comment to new list
+                        downloadedComments.append(comment)
 
-            # == CHECK FOR WEIRD TIMES ==
-            # For some reason, some VODs have messages LATER 
-            # than the stream length according to metadata!
-            # Fall FORWARD to last comment timecode if so.
-            vod_duration = downloaderCheckDuration(downloaded_comments, vod_duration)
+                        # Update "Downloading..." card to represent download progress.
+                        percent = int(time / vod_duration * 100) if vod_duration > 0 else 0
 
-            # == WRITE TO TEMP FILE ==
-            # Dump formatted comments into a temp file,
-            # allows the program to treat all chatlogs
-            # agnostically between downloaded or file-imported
-            with open(vod_tempfile, "w", encoding="utf-8") as f:
-                json.dump({"comments": downloaded_comments}, f, ensure_ascii=False, indent=4)
+                        if percent != lastPercent:
+                            lastPercent = percent
+                            # Change to app.after for thread safety, .configure from background thread is not thread safe
+                            app.after(0, lambda card=urlCard, percent=percent: card.configure(text=f"Downloading...\n{percent}%"))
 
-        # == Exceptions ==
-        # Warnings for any invalid URLs:
-        except NonMediaError as error:
-            app.after(0, urlCard.destroy) # delete "Downloading..." card
-            app.after(0, lambda: messagebox.showwarning("Import Failed", f"Please enter a VOD or Clip URL, not a channel link."))
-            return
+                    # == CHECK FOR WEIRD TIMES ==
+                    # For some reason, some VODs have messages LATER 
+                    # than the stream length according to metadata!
+                    # Fall FORWARD to last comment timecode if so.
+                    vod_duration = downloaderCheckDuration(downloadedComments, vod_duration)
 
-        # Warn the user if the downloaded VOD has no comments,
-        # Unfortunate, but it does happen.
-        except EmptyChatError as error:
-            app.after(0, urlCard.destroy) # delete "Downloading..." card
-            app.after(0, lambda: messagebox.showwarning("Import Failed", f"No messages found for this VOD:\n{vod_url}"))
-            return
+                    # == WRITE TO TEMP FILE ==
+                    # Dump formatted comments into a temp file,
+                    # allows the program to treat all chatlogs
+                    # agnostically between downloaded or file-imported
+                    with open(vod_tempfile, "w", encoding="utf-8") as f:
+                        json.dump({"comments": downloadedComments}, f, ensure_ascii=False, indent=4)
 
-        # Any other errors.
-        except Exception as error:
-            app.after(0, urlCard.destroy) # delete "Downloading..." card
-            app.after(0, lambda: messagebox.showerror("Import Failed for Unknown Reasons", f"Could not fetch chat from URL:\n{vod_url}"))
-            return
+                # == Exceptions ==
+                # Warnings for any invalid URLs:
+                except NonMediaError as error:
+                    def NonMediaException(card=urlCard): # card destruction and queue manipulation in one tick for thread safety
+                        if card in importState["pending"]:
+                            importState["pending"].remove(card)
+                        card.destroy()                          # delete failed "Downloading..." card
+                        importSortPending()
+                        messagebox.showwarning("Import Failed", "Please enter a VOD or Clip URL, not a channel link.")
+                    app.after(0, NonMediaException)
+                    importState["queue"].task_done()
+                    continue
 
-        # Inner INNER function:
-        # If successful download, attach VOD info to chatlog chain "jsonData".
-            # "jsonData" as a list of dicts, containing: 
-            # filepath, vod label, length, comments 
-            # "comments" as list of dicts, containing commenter, messages, and content_offset_seconds 
-        def update_ui():
-            jsonData.append({"path": vod_tempfile, "name": vod_label, "endTime": vod_duration, "comments": downloaded_comments, "button": urlCard})
-            if len(jsonData) >= 1:
-                jsonSelect(len(jsonData) - 1)
+                # Warn the user if the downloaded VOD has no comments,
+                # Unfortunate, but it does happen.
+                except EmptyChatError:
+                    def EmptyChatException(card=urlCard, url=vod_url): # card destruction and queue manipulation in one tick for thread safety
+                        if card in importState["pending"]:
+                            importState["pending"].remove(card)
+                        card.destroy()                          # delete failed "Downloading..." card
+                        importSortPending()
+                        messagebox.showwarning("Import Failed", f"No messages found for this VOD:\n{url}")
+                    app.after(0, EmptyChatException)
+                    importState["queue"].task_done()
+                    continue
 
-            # Update the "downloading" label to reflect the VOD's information
-            urlCard.configure(
-                text=str(len(jsonData)) 
-                + " - " + jsonData[-1]["name"] 
-                + "\nDuration: " 
-                + "(" 
-                + str(timedelta(seconds=vod_duration)) + ")",
-                state="normal",
-                fg_color="#7a2b2b", hover_color="#5c1e1e",
-                command=lambda index=len(jsonData) - 1: jsonSelect(index)
-            )
+                # Any other errors.
+                except Exception as error:
+                    def ExceptionUnknown(card=urlCard, url=vod_url): # card destruction and queue manipulation in one tick for thread safety
+                        if card in importState["pending"]:
+                            importState["pending"].remove(card)
+                        card.destroy()                          # delete failed "Downloading..." card
+                        importSortPending()
+                        messagebox.showerror("Import Failed for Unknown Reasons", f"Could not fetch chat from URL:\n{url}")
+                    app.after(0, ExceptionUnknown)
+                    importState["queue"].task_done()
+                    continue
 
-        # Update UI after thread completes.
-        app.after(0, update_ui)
+                ui_done = threading.Event()
+
+                # Inner INNER function:
+                # If successful download, attach VOD info to chatlog chain "jsonData".
+                    # "jsonData" as a list of dicts, containing: 
+                    # filepath, vod label, length, comments 
+                    # "comments" as list of dicts, containing commenter, messages, and content_offset_seconds
+
+                # Params changed to be explicit to capture current loop's variables
+                def update_ui(card=urlCard, path=vod_tempfile, name=vod_label, duration=vod_duration, comments=downloadedComments):
+                    try:
+                        if card in importState["pending"]: # Don't crash if there's no card to remove
+                            importState["pending"].remove(card)
+                        jsonData.append({"path": path, "name": name, "endTime": duration, "comments": comments, "button": card})
+                        
+                        # Index of current card
+                            # If there is jsonData[0] (spacer) and jsonData[1], 
+                            # then len(jsonData) == 2 to get to [1], 
+                            # so subtract 1
+                        index = len(jsonData) - 1
+
+                        # Update the "downloading" label to reflect the VOD's information
+                        card.configure(
+                            text=f"{index} - {name}\nDuration: ({timedelta(seconds=duration)})",
+                            state="normal",
+                            fg_color="#7a2b2b", hover_color="#5c1e1e",
+                            command=lambda index=index: jsonSelect(index)
+                        )
+                        card.grid(row=index, column=0, padx=5, pady=2, sticky="ew")
+                        importSortPending() # Make sure cards are in the right place with no empty spaces in case one fails
+
+                        # Only auto-select when no more URLs are waiting in the queue
+                        if importState["queue"].empty():
+                            jsonSelect(index)
+                    finally:
+                        ui_done.set()
+                # Update UI after thread completes.
+                app.after(0, update_ui)
+                ui_done.wait()
+                importState["queue"].task_done()
+
+        finally:
+            with importState["lock"]:
+                importState["running"] = False
 
     # Entire program froze during download 
     # unless threading was brought in.
-    threading.Thread(target=download, daemon=True).start()
-
+    threading.Thread(target=downloadLoop, daemon=True).start()
     viewerModeSelect(viewerModeButtons.get())
 
 # Pokes around the esoteric Chat-Downloader backend to try and get
@@ -1130,7 +1236,14 @@ def viewerSmallCapsPass(text):
     else:
         return text
 
-def getViewerFont(family, size):
+#NOTE: The following fixed the font glitching issue.
+    # Instead of directly mutating the same viewerFont object, the program
+    # is now (as-needed) passing in new font objects to the viewer before any now rebuild
+# CustomTkinter updates scaling instantly when it sees a NEW font reference BEFORE text changes
+    # Before, CustomTkinter was not noticing changes due to how the program was mutating font, so tkinter.Text was freaking out.
+
+# Create new font object whenever necessary.
+def viewerGetFont(family, size):
     key = (family, size)
     if key not in viewerFontCache:
         viewerFontCache[key] = tkfont.Font(family=family, size=size)
@@ -1168,7 +1281,7 @@ def viewerUpdateFont(font):
         family, size = fontDict.get(font, fontDict["Defaults"])
         #viewerFont.configure(family=family, size=size)
 
-        viewerFont = getViewerFont(family, size)
+        viewerFont = viewerGetFont(family, size)
         viewer.configure(font=viewerFont)
 
         outputUseCache = False
@@ -1189,7 +1302,7 @@ def viewerFontReset():
     if fontPreview.get() == 0:
         #print("TURN OFF FONTS")
         #viewerFont.configure(family="Courier New", size=11)
-        viewerFont = getViewerFont("Courier New", 11)
+        viewerFont = viewerGetFont("Courier New", 11)
         viewer.configure(font=viewerFont)
         settingsSmallCaps = False
 
@@ -1361,8 +1474,8 @@ def sectionSelect(index, isEmpty=False):
         rangeSourceTitle.configure(text="Current Source: " + jsonData[currentJson]["name"])
 
     # added this block for handling update buttons
-    if not isEmpty:
-        selected = sections[index]
+    #if not isEmpty:
+    selected = sections[index] #this didn't need to be in a conditional
     if selected["jsonIndex"] == 0:
         # Load spacer duration into the spacer boxes
         rangeUpdateBoxes(hourSpacer, minSpacer, secSpacer, selected["end"] - selected["start"])
@@ -1442,6 +1555,9 @@ def sectionUpdate(isSpacer=False):
 
     if not sections or not (0 <= currentSection < len(sections)):
         return
+
+    if sectionIsSpacer():
+        isSpacer= True
 
     target = sections[currentSection]
     target_is_spacer = (target["jsonIndex"] == 0)
@@ -1938,18 +2054,23 @@ sectionTotalTime.grid_rowconfigure(1, weight=0)
 sectionTotalTime.grid(row=1, column=0, padx=0, pady=0, sticky="ew")
 
 #sectionShifterButtons. Section shift and delete buttons
-sectionShifterButtons = customtkinter.CTkFrame(master=rightSide)
-sectionShifterButtons.grid(row=3, column=0, padx=10, pady=(2, 10), sticky="ew")
-sectionShifterButtons.grid_rowconfigure(0, weight=1)
+sectionShifterFrame = customtkinter.CTkFrame(master=rightSide)
+sectionShifterFrame.grid(row=3, column=0, padx=10, pady=(2, 10), sticky="ew")
+sectionShifterFrame.grid_rowconfigure(0, weight=1)
 
-shiftUpButton = customtkinter.CTkButton(master=sectionShifterButtons, text="▲", font = ("Roboto", 18), command=callUp, width=40)
+shiftUpButton = customtkinter.CTkButton(master=sectionShifterFrame, text="▲", font = ("Roboto", 18), command=callUp, width=40)
 shiftUpButton.grid(row=0, column=0, padx=(38, 3), pady=5, sticky="ns")
-shiftDownButton = customtkinter.CTkButton(master=sectionShifterButtons, text="▼", font = ("Roboto", 18), command=callDown, width=40)
+shiftDownButton = customtkinter.CTkButton(master=sectionShifterFrame, text="▼", font = ("Roboto", 18), command=callDown, width=40)
 shiftDownButton.grid(row=0, column=1, padx=3, pady=5, sticky="ns")
-shiftDeleteButton = customtkinter.CTkButton(master=sectionShifterButtons, text="⌫", font = ("Roboto", 14), command=callDelete, width=40)
+shiftDeleteButton = customtkinter.CTkButton(master=sectionShifterFrame, text="⌫", font = ("Roboto", 14), command=callDelete, width=40)
 shiftDeleteButton.grid(row=0, column=2, padx=3, pady=5, sticky="ns")
-shiftUpdateButton = customtkinter.CTkButton(master=sectionShifterButtons, text="✎", font = ("Roboto", 14), command=sectionUpdate, width=40)
+shiftUpdateButton = customtkinter.CTkButton(master=sectionShifterFrame, text="✎", font = ("Roboto", 14), command=sectionUpdate, width=40)
 shiftUpdateButton.grid(row=0, column=3, padx=3, pady=5, sticky="ns")
+
+shiftUpTooltip = CTkToolTip(shiftUpButton, follow=True, alpha=0.8, delay=0, x_offset=-50, y_offset=-40, message="Move Section Up")
+shiftDownTooltip = CTkToolTip(shiftDownButton, follow=True, alpha=0.8, delay=0, x_offset=-50, y_offset=-40, message="Move Section Down")
+shiftDeleteTooltip = CTkToolTip(shiftDeleteButton, follow=True, alpha=0.8, delay=0, x_offset=-50, y_offset=-40, message="Delete Section")
+shiftUpdatepTooltip = CTkToolTip(shiftUpdateButton, follow=True, alpha=0.8, delay=0, x_offset=-50, y_offset=-40, message="Update Section")
 
 #----------------------------------------------------------------------------------------------
 #subtitle settings
@@ -2071,9 +2192,6 @@ rangeSlider.grid(row=3, column=0, padx=5, pady=2, sticky="ew")
 rangeCreateButton = customtkinter.CTkButton(master=timeEntry, text="Create Section", command=lambda: sectionCreate())
 rangeCreateButton.grid(row=0, column=11, padx=5, pady=(5,3), sticky="n")
 
-#rangeUpdateButton = customtkinter.CTkButton(master=rangeUpdateButtonFrame, width=50, fg_color="#74456B", hover_color="#4E3149", text="Update Section", command=lambda: sectionUpdate(isSpacer=False))
-#rangeUpdateButton.grid(row=0, column=0, padx=1, pady=(5,3), sticky="n",)
-
 spacerCreator = customtkinter.CTkFrame(master=rangeBox)
 spacerCreator.grid(row=5, column=0, padx=1, pady=1, sticky="n")
 spacerCreator.grid_rowconfigure(0, weight=1)
@@ -2092,19 +2210,8 @@ secSpacer = customtkinter.CTkEntry(spacerCreator, placeholder_text="s")
 secSpacer.grid(row=0, column=5, pady=5, sticky="n")
 secSpacer.configure(width=30, justify="center")
 
-'''spacerCreateButtonFrame = customtkinter.CTkFrame(master=spacerCreator, width=100, height=25)
-spacerCreateButtonFrame.grid(row=0, column=6, padx=0, pady=0, sticky="nesw")
-spacerCreateButtonFrame.grid_propagate(False)'''
-
 spacerCreateButton = customtkinter.CTkButton(master=spacerCreator, width=50, text="Create Spacer", command=lambda: sectionCreate(isEmpty=True))
 spacerCreateButton.grid(row=0, column=6, padx=5, pady=5)
-
-#rangeSpacerUpdateButtonFrame = customtkinter.CTkFrame(master=spacerCreator, width=100, height=25)
-#rangeSpacerUpdateButtonFrame.grid(row=0, column=0, padx=0, pady=0, sticky="nesw")
-#rangeSpacerUpdateButtonFrame.grid_propagate(False)
-
-#rangeSpacerUpdateButton = customtkinter.CTkButton(master=rangeSpacerUpdateButtonFrame, width=50, fg_color="#74456B", hover_color="#4E3149", text="Update Spacer", command=lambda: sectionUpdate(isSpacer=True))
-#rangeSpacerUpdateButton.grid(row=0, column=0, padx=5, pady=5)
 
 #--------------------------------------------------------------------------
 #Middle Section Scroller. The chatlog viewer. Its scrollbar is its own and is NOT connected to any slider as of right now.
