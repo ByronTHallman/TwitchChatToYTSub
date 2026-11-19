@@ -115,7 +115,7 @@ app = CTkDnD()  # creates the window
 TkinterDnD.require(app) # for the class wrapper
 
 app.geometry("1000x800")
-app.resizable(False, False) #The timelines sorta break if the window is resizable.
+app.resizable(True, True) #The timelines needed just a bit of encouragement
 app.title("TwitchChatSubber")
 app.focus_force()
 
@@ -172,7 +172,7 @@ yttLine = 240       # The y values of the output timeline.
 chatlogPlayheadValue = 0      # Global variable storing first timeline playhead value for access.
 outputPlayheadValue = 0       # Global variable storing second timeline playhead value for access.
 rangeSliderValues = {}        # Global dict storing keys assigned TRIPLES representing slider range left, right handle values AND slide ranger length.
-rangeSpacerDefaults = 600     # Fixed value of 10 minutes for "ranges" to give spacers in order to make ranges useful when "selecting" the spacer "json". 12 hours still the actual max.
+rangeSpacerDefaults = 300     # Fixed value of added 5 minutes (to set section size) for "ranges" to give spacers in order to make ranges useful when "selecting" the spacer "json". 12 hours still the actual max.
 
 # Viewer global variables
 viewerTimes = []                    # Stored message times for viewer interaction with sliders
@@ -358,81 +358,98 @@ def importFileJSON(droppedFile=None):
 
     promptUser = True if not droppedFile else False
 
-    # Create a placeholder "Importing..." card
-    # (before filedialog process because
+    # Placeholder "Importing..." card
+    # (BEFORE filedialog process because
     #  it seems to take the longest.)
-    jsonCard = customtkinter.CTkButton(
+    firstCard = customtkinter.CTkButton(
         master=jsonShelf,
         text="Importing...",
         state="disabled",  # Prevent clicking while loading
         fg_color="#374c64"  # Greyer color for loading state
     )
-    jsonCard.grid(row=len(jsonData) + len(importState["pending"]), column=0, padx=5, pady=2, sticky="ew")
+    firstCard.grid(row=len(jsonData) + len(importState["pending"]), column=0, padx=5, pady=2, sticky="ew")
 
     # Prompt user for JSON.
     if promptUser:
-        filePath = filedialog.askopenfilename(
-            title="Import JSON file",
+        filePaths = filedialog.askopenfilenames(
+            title="Import JSON files",
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
         )
 
     if droppedFile:
-        filePath = droppedFile
+        filePaths = (droppedFile,)
 
-    if not filePath:
+    if not filePaths:
         # Delete "Importing..."" card if import is missing.
-        app.after(0, jsonCard.destroy)
+        app.after(0, firstCard.destroy)
         return
 
-    # Attempt import of JSON file.
-    try:
-        with open(filePath, "r", encoding="utf-8") as json_file:
-            imported_data = json.load(json_file)
-    except (OSError, json.JSONDecodeError) as error:
-        # Delete "Importing..."" card if import fails to read.
-        messagebox.showerror("Import failed", f"Could not load this JSON file:\n{error}")
-        app.after(0, jsonCard.destroy)
-        return
+    app.update_idletasks()
 
-    # Take stream info metadata to create chatlog label.
-    json_metadata = importQueryJSON(imported_data)
+    for filePath in filePaths:
+        # Create a placeholder "Importing..." card
+        if firstCard is not None:
+            jsonCard = firstCard
+            firstCard = None
+        else:
+            # Make more placeholder cards if there's more imports coming
+            jsonCard = customtkinter.CTkButton(
+                master=jsonShelf,
+                text="Importing...",
+                state="disabled",  # Prevent clicking while loading
+                fg_color="#374c64"  # Greyer color for loading state
+            )
+            jsonCard.grid(row=len(jsonData) + len(importState["pending"]), column=0, padx=5, pady=2, sticky="ew")
 
-    # Write label info
-    json_label = f"{json_metadata['streamer']}, {json_metadata['date']}\nGame: {json_metadata['game']}"
-    duration = json_metadata.get('duration', 0)
+        # Attempt import of JSON file.
+        try:
+            with open(filePath, "r", encoding="utf-8") as json_file:
+                imported_data = json.load(json_file)
+        except (OSError, json.JSONDecodeError) as error:
+            # Delete "Importing..."" card if import fails to read.
+            messagebox.showerror("Import failed", f"Could not load this JSON file:\n{error}")
+            app.after(0, jsonCard.destroy)
+            continue
 
-    # Warn the user if the chatlog is devoid of comments, but let them use it if they want to for some ungodly reason.
-    if json_metadata.get('comments') == []:
-        json_label += ", WARNING: EMPTY"
-        app.after(0, lambda: messagebox.showwarning("Import Warning", f"No messages found for this file."))
+        # Take stream info metadata to create chatlog label.
+        json_metadata = importQueryJSON(imported_data)
 
-    # If some data is missing, fallback to filename.
-    if(not (json_metadata['streamer'] or json_metadata['game'] or json_metadata['date'])):
-        json_label = Path(filePath).stem
+        # Write label info
+        json_label = f"{json_metadata['streamer']}, {json_metadata['date']}\nGame: {json_metadata['game']}"
+        duration = json_metadata.get('duration', 0)
 
-    # Attach this JSON to the chain of chatlog information.
-    jsonData.append({"path":filePath, "name":json_label, "endTime":duration, "button": jsonCard})
-    jsonCard.grid(row=len(jsonData) - 1, column=0, padx=5, pady=2, sticky="ew")
-    importSortPending()
+        # Warn the user if the chatlog is devoid of comments, but let them use it if they want to for some ungodly reason.
+        if json_metadata.get('comments') == []:
+            json_label += ", WARNING: EMPTY"
+            app.after(0, lambda: messagebox.showwarning("Import Warning", f"No messages found for this file."))
+
+        # If some data is missing, fallback to filename.
+        if(not (json_metadata['streamer'] or json_metadata['game'] or json_metadata['date'])):
+            json_label = Path(filePath).stem
+
+        # Attach this JSON to the chain of chatlog information.
+        jsonData.append({"path":filePath, "name":json_label, "endTime":duration, "button": jsonCard})
+        jsonCard.grid(row=len(jsonData) - 1, column=0, padx=5, pady=2, sticky="ew")
+        importSortPending()
+
+        # Update "Importing..." card to reflect the JSON's info.
+            # "jsonData" as a list of dicts, containing: 
+            # filepath, vod label, length, comments 
+            # "comments" as list of dicts, containing commenter, messages, and content_offset_seconds
+        jsonCard.configure(
+            text=str(len(jsonData)-1)
+            + " - " + jsonData[-1]["name"]
+            + "\nDuration: "
+            + "("
+            + str(timedelta(seconds=duration)) + ")",
+            state="normal",
+            fg_color="#1f538d", hover_color="#14375e",
+            command=lambda index=len(jsonData) - 1: jsonSelect(index)
+        )
+        app.update_idletasks()
 
     if len(jsonData) > 1:
-        #print(len(jsonData) - 1)
         jsonSelect(len(jsonData) - 1)
-
-    # Update "Importing..." card to reflect the JSON's info.
-        # "jsonData" as a list of dicts, containing: 
-        # filepath, vod label, length, comments 
-        # "comments" as list of dicts, containing commenter, messages, and content_offset_seconds
-    jsonCard.configure(
-        text=str(len(jsonData)-1)
-        + " - " + jsonData[-1]["name"]
-        + "\nDuration: "
-        + "("
-        + str(timedelta(seconds=duration)) + ")",
-        state="normal",
-        fg_color="#1f538d", hover_color="#14375e",
-        command=lambda index=len(jsonData) - 1: jsonSelect(index)
-    )
 
     viewerModeSelect(viewerModeButtons.get())
 
@@ -613,7 +630,7 @@ def importDownloadURL():
                             importState["pending"].remove(card)
                         card.destroy()                          # delete failed "Downloading..." card
                         importSortPending()
-                        messagebox.showerror("Import Failed for Unknown Reasons", f"Could not fetch chat from URL:\n{url}")
+                        messagebox.showerror("Import Failed for Unknown Reasons", f"Could not fetch chat from URL:\n{url}\n\n{type(error).__name__}: {error}")
                     app.after(0, ExceptionUnknown)
                     importState["queue"].task_done()
                     continue
@@ -1183,7 +1200,7 @@ def viewerScroll(timelineSeconds):
     # Remove highlight from last highlighted message.
     viewer.tag_remove("active_highlight", "1.0", "end")
     
-    # Jump to last possible chat message in visualizer
+    # Jump to last possible chat message in visualizer (if timecode past last message)
     if target_index >= len(viewerTimes):
         viewer.yview("end")
     else:
@@ -1193,17 +1210,74 @@ def viewerScroll(timelineSeconds):
         # Jump to the found message
         viewer.yview(line_index)
 
-        # Keep track of how close to the end the message is
-        timeLeft = len(viewerTimes) - float(line_index)
-
-        # If not near the end, shift the viewer's offset to center the found message more
-        if(timeLeft) > 7:
-            viewer.yview_scroll(-7, "units")
+        # Check if viewer's lines are readable information
+        info = viewer.dlineinfo(line_index)
+        if info:
+            line_height = info[3]
+            visible_height = viewer.winfo_height() - (2 * int(viewer.cget("pady")))
+            half_screen = max(1, (visible_height // line_height) // 2)
         else:
-            viewer.yview_scroll(-(int(timeLeft)), "units")
+            half_screen = 7
+
+        # Keep track of how close to the end the message is to the end
+        timeLeft = (len(viewerTimes) - 1) - target_index
+        if timeLeft > half_screen:
+            viewer.yview_scroll(-half_screen, "units")
+        else:
+            viewer.yview_scroll(-timeLeft, "units")
 
         # Highlight the found message
         viewer.tag_add("active_highlight", line_index, f"{line_index} lineend")
+
+# Scrolls onto the active playhead whenever 
+# the app window is being resized.
+# Called by viewer.bind("<Configure>")
+def viewerScrollOnResize(event=None):
+    if not viewerTimes:
+        return
+
+    if viewerModeButtons.get() == "Output Preview": # When the window is being resized
+        viewerScroll(outputPlayheadValue)   # Scroll to the playhead
+    else:
+        viewerScroll(chatlogPlayheadValue)  # of the currently active timeline
+
+# Allows the user to click on a timestamp to jump the playhead to that timestamp
+def viewerScrollOnTimestampClick(event):
+    global outputJumppoint
+
+    # Convert mouse x/y pixel coordinates into text index
+    index = viewer.index(f"@{event.x},{event.y}")
+
+    # Look back 1 character past the click to find start end indices of the timestamp tag
+    # +1 character to ensure clicking the first character gets caught
+    tagRange = viewer.tag_prevrange("timestamp", f"{index}+1c")
+
+    # Bail if no tagged timestamp was found where clicked
+    if not tagRange:
+        return
+
+    # Removes existing click-drag selected text
+    viewer.tag_remove("sel", "1.0", "end")
+
+    # Grab tagged timestamp text
+    # Strip surrounding whitespace
+    # Convert to hours, minutes, seconds
+    timestampString = viewer.get(*tagRange).strip()
+    hours, minutes, seconds = timestampString.split(":")
+    timestamp = helpStampToSec(int(hours), int(minutes), float(seconds))
+
+    if viewerModeButtons.get() == "Output Preview":
+        timelinesOutputSlider.set(timestamp)
+        outputJumppoint = "playhead"
+        tracksOutputDragged()
+    else:
+        endTime = jsonData[currentJson].get("endTime", 0) if currentJson != -1 else 0
+        percent = (timestamp / endTime * 100) if endTime > 0 else 0
+        timelinesChatlogSlider.set(percent)
+        tracksChatlogDragged()
+
+    # Tells TKinter to not let clicks create click-and-drag
+    return "break"
 
 # For choosing chat viewer modes
 def viewerModeSelect(mode):
@@ -1213,6 +1287,7 @@ def viewerModeSelect(mode):
     if mode == "Source Preview":
         if viewerModeButtons.get() != "Source Preview":
             viewerModeButtons.set("Source Preview")
+        viewerModeButtons.configure(selected_color="#1f538d")
         viewerRender(scrollTo="playhead")
         tracksEmphasizeMode(isOutput=False)
 
@@ -1221,6 +1296,7 @@ def viewerModeSelect(mode):
         if viewerModeButtons.get() != "Output Preview":
             viewerModeButtons.set("Output Preview")
         print(outputJumppoint)
+        viewerModeButtons.configure(selected_color="#2b7a3d")
         viewerRender(scrollTo=outputJumppoint)
         tracksEmphasizeMode(isOutput=True)
     
@@ -1351,6 +1427,9 @@ def sectionValidEnds(start, end, maxEnd):
         messagebox.showwarning("Invalid Section", "Specified time can only create section of zero seconds, please try again.")
         return 0
     if start > end or start < 0 or end < 0:
+        if sectionIsSpacer():
+                messagebox.showwarning("Invalid Spacer", "Why are you making a negative size spacer?\n\nPlease try again.")
+                return 0
         messagebox.showwarning("Section Warning", "Please make sure your start is not before your end.\n\nSetting end to maximum length.")
         return maxEnd
     elif(end > maxEnd):
@@ -1538,18 +1617,6 @@ def sectionDelete(index):
         viewerSection = currentSection
         sectionSelect(currentSection)
 
-'''
-def sectionSyncUpdateButtons():
-    if not sections or not (0 <= currentSection < len(sections)):
-        rangeUpdateButton.configure(state="disabled")
-        rangeSpacerUpdateButton.configure(state="disabled")
-        return
-
-    is_spacer = (sections[currentSection]["jsonIndex"] == 0)
-    rangeUpdateButton.configure(state="disabled" if is_spacer else "normal")
-    rangeSpacerUpdateButton.configure(state="normal" if is_spacer else "disabled")
-'''
-
 def sectionUpdate(isSpacer=False):
     global currentJson, outputUseCache
 
@@ -1563,6 +1630,7 @@ def sectionUpdate(isSpacer=False):
     target_is_spacer = (target["jsonIndex"] == 0)
 
     # Guard against updating a spacer with section controls (or vice versa)
+    # No longer applicable to current implementation
     #if isSpacer != target_is_spacer:
         #return
 
@@ -1623,18 +1691,22 @@ def rangeStore(rangeSlider, index):
     values = rangeSlider.get() or [0, 100] #default to [0, 100] if range isn't stored
     rangeSliderValues[index] = (values[0], values[1], rangeSlider.cget("to")) #add positions and endpoint
 
+# Look up slider state for source connected to chosen section 
+# and return left handle, right handle, slider max as a triple
 def rangePull(index):
     print("range pull")
     rangeTriple = (0, 100, 100) #Default values
 
-    if index in rangeSliderValues:
+    if index in rangeSliderValues and jsonData[index].get("path") is not None:
         rangeTriple = rangeSliderValues.get(index)      # Take STORED ranges if available
 
     elif -1 < index < len(jsonData):                    # Unstored?
-        endTime = jsonData[index].get("endTime", rangeSpacerDefaults)   # get normal souce's endpoint, fallback to 100 if none exist
+        endTime = jsonData[index].get("endTime", 100)   # get normal souce's endpoint, fallback to 100 if none exist
 
         if jsonData[index].get("path") is None:         # check if pulled source is a spacer
-            endTime = min(endTime, rangeSpacerDefaults) # spacer ranges visualize to only 30 minutes
+            spacerDelta = (sections[currentSection]["end"] - sections[currentSection]["start"]) if (sections and 0 <= currentSection < len(sections)) else 0
+            spacerLimit = min(43200, spacerDelta + rangeSpacerDefaults) #12 hours vs current spacer
+            endTime = min(endTime, spacerLimit) # spacer ranges visualize to only 30 minutes
 
         rangeTriple = (0, endTime, endTime)
     else:
@@ -1662,8 +1734,8 @@ def rangeManagement(index):
             
             if isEmpty:
                 print("it's empty!!!!")
-                rangeLimit = rangeSpacerDefaults
-                rangeRight = rangeSpacerDefaults
+                #rangeLimit = rangeSpacerDefaults  #rangeLimit now changed within rangePull to reflect spacer related information
+                rangeRight = rangeLimit
 
             #3. set the sliders in the right place. and markers
             rangeSlider.configure(to=rangeLimit)      # set limit
@@ -1684,7 +1756,8 @@ def rangeManagement(index):
         if index < len(jsonData):
             print("rangemanagement here, hey your index is less than jsonData length")
             if jsonData[index].get("path") == None: # is it a spacer?
-                endTime = rangeSpacerDefaults
+                spacerDelta = (sections[currentSection]["end"] - sections[currentSection]["start"]) if (sections and 0 <= currentSection < len(sections) and sections[currentSection]["jsonIndex"] == 0) else 0
+                endTime = min(43200, spacerDelta + rangeSpacerDefaults) #Take whatever the spacer section's length is and add 10 minutes
             else:
                 endTime = jsonData[index].get("endTime", 100) #first JSON is a special case
         else:
@@ -1709,11 +1782,11 @@ def rangeMoveMarker(sliderValue, side):
     offset        = {"left": -11, "right": -1}.get(side, 0)
     rangePlayhead = {"left": rangeMinMarker, "right": rangeMaxMarker}.get(side, None)
 
-    track_width = timelineMaxx - timelineMinx
+    trackWidth = timelineMaxx - timelineMinx
     rangeSliderMax = rangeSlider.cget("to")
     sliderPercent = (sliderValue / rangeSliderMax) if rangeSliderMax != 0 else 0
     
-    new_x = (timelineMinx + (track_width * sliderPercent) + offset) if sliderPercent != 0 else 40
+    new_x = (timelineMinx + (trackWidth * sliderPercent) + offset) if sliderPercent != 0 else 40
     current_x = timelines.bbox(rangePlayhead)[0] #why did I write this
     current_y = timelines.bbox(rangePlayhead)[1]
 
@@ -1814,20 +1887,66 @@ def rangeUpdateHandles(event=None):
 # TIMELINES
 #--------------------------------------------------------------------------
 
+def tracksDrawBase():
+    timelines.delete("base")
+    timelines.create_line(timelineMinx, jsonLine, timelineMaxx, jsonLine, fill="white", tags="base")
+    timelines.create_line(timelineMinx, jsonLine + timelineMark + 5, timelineMinx, jsonLine - timelineMark - 5, fill="white", tags="base")
+    timelines.create_line(timelineMaxx, jsonLine + timelineMark + 5, timelineMaxx, jsonLine - timelineMark - 5, fill="white", tags="base")
+
+    timelines.create_line(timelineMinx, yttLine, timelineMaxx, yttLine, fill="white", tags="base")
+    timelines.create_line(timelineMinx, yttLine + timelineMark + 5, timelineMinx, yttLine - timelineMark - 5, fill="white", tags="base")
+    timelines.create_line(timelineMaxx, yttLine + timelineMark + 5, timelineMaxx, yttLine - timelineMark - 5, fill="white", tags="base")
+    timelines.tag_lower("base")  # Keep timeline base behind section bars and playheads
+
+def tracksOnResize(event):
+    global timelineMaxx # gotta update this if we're changing the window.
+
+    # Find the new width
+    newX = event.width - timelineMinx
+
+    # Don't change if it's smaller than the minimum size or completely the same
+    if newX <= timelineMinx or newX == timelineMaxx:
+        return
+
+    timelineMaxx = newX
+    trackWidth = timelineMaxx - timelineMinx
+
+    # Find the center of the window
+    centerX = event.width // 2
+
+    # Resize sliders and re-center title buttons
+    timelinesChatlogSlider.configure(width=trackWidth + 16)
+    timelinesOutputSlider.configure(width=trackWidth + 16)
+    timelinesChatlogTitle.place(x=centerX, y=jsonLine - 60, anchor="center")
+    timelinesOutputTitle.place(x=centerX, y=yttLine - 60, anchor="center")
+
+    # Redraw everything
+    tracksDrawBase()
+    tracksRedraw()
+
+    # Get range slider handle positions and reset markers    
+    left, right = rangeSlider.get()
+    rangeMoveMarker(left, "left")
+    rangeMoveMarker(right, "right")
+
 # Section timeline slider functions
 def tracksEmphasizeMode(isOutput=False):
     if isOutput:
         timelinesChatlogTitle.configure(
-            border_color="#242424" #Matching canvas with customtkinter color"
+            fg_color="#3D3D3D",
+            border_color="#242424"
         )
         timelinesOutputTitle.configure(
+            fg_color="#163d1f",
             border_color="#2b7a3d"
         )
     else:
         timelinesChatlogTitle.configure(
+            fg_color="#112e4d",
             border_color="#1f538d"
         )
         timelinesOutputTitle.configure(
+            fg_color="#3D3D3D",
             border_color="#242424"
         )
 
@@ -1852,8 +1971,8 @@ def tracksUpdatePlayhead(slider, tracking_line, base_y, tracking_value, seconds_
 
     # Calculate current slider value, turn into seconds.
     sliderPercent = (slider.get() - slider.cget("from_")) / sliderRange
-    track_width = timelineMaxx - timelineMinx
-    new_x = timelineMinx + (sliderPercent * track_width) + 1
+    trackWidth = timelineMaxx - timelineMinx
+    new_x = timelineMinx + (sliderPercent * trackWidth) + 1
     timelineSeconds = int(seconds_value * sliderPercent)
 
     # Move tracking line and value around timeline
@@ -2053,7 +2172,7 @@ sectionTotalTime = customtkinter.CTkLabel(master = sectionShelfTitle, text=f"Tot
 sectionTotalTime.grid_rowconfigure(1, weight=0)
 sectionTotalTime.grid(row=1, column=0, padx=0, pady=0, sticky="ew")
 
-#sectionShifterButtons. Section shift and delete buttons
+#Shifter Buttons. Section shift, delete, and update buttons
 sectionShifterFrame = customtkinter.CTkFrame(master=rightSide)
 sectionShifterFrame.grid(row=3, column=0, padx=10, pady=(2, 10), sticky="ew")
 sectionShifterFrame.grid_rowconfigure(0, weight=1)
@@ -2066,6 +2185,10 @@ shiftDeleteButton = customtkinter.CTkButton(master=sectionShifterFrame, text="âŒ
 shiftDeleteButton.grid(row=0, column=2, padx=3, pady=5, sticky="ns")
 shiftUpdateButton = customtkinter.CTkButton(master=sectionShifterFrame, text="âœŽ", font = ("Roboto", 14), command=sectionUpdate, width=40)
 shiftUpdateButton.grid(row=0, column=3, padx=3, pady=5, sticky="ns")
+
+# Tooltips (differences to account for bugginess on mac)
+tooltipDelay = 0.05 if sys.platform == "darwin" else 0
+tooltipRadius = 0 if sys.platform == "darwin" else 6
 
 shiftUpTooltip = CTkToolTip(shiftUpButton, follow=True, alpha=0.8, delay=0, x_offset=-50, y_offset=-40, message="Move Section Up")
 shiftDownTooltip = CTkToolTip(shiftDownButton, follow=True, alpha=0.8, delay=0, x_offset=-50, y_offset=-40, message="Move Section Down")
@@ -2088,11 +2211,6 @@ settingsBox.grid_propagate(False)
 
 settingsButton = customtkinter.CTkButton(master=rightSide, text="Settings", font = ("Roboto", 14), fg_color="#7a5e2b", hover_color="#5c481e", command=settingsOpen)
 settingsButton.grid(row=1, column=0, padx=5, pady=5, sticky="new")
-
-'''settingsBox = customtkinter.CTkFrame(master=rightSide)
-settingsBox.grid(row=5, column=0, padx=10, pady=(0, 10), sticky="ew")
-settingsBox.grid_columnconfigure(1, weight=1)
-'''
 
 # independent fixed column frames so control redraws cannot shift labels
 settingsLabels = customtkinter.CTkFrame(master=settingsBox, fg_color="transparent", width=136, height=180)
@@ -2209,6 +2327,7 @@ msemSpacer.grid(row=0, column=4, padx=(2, 2.1), pady=5)
 secSpacer = customtkinter.CTkEntry(spacerCreator, placeholder_text="s")
 secSpacer.grid(row=0, column=5, pady=5, sticky="n")
 secSpacer.configure(width=30, justify="center")
+secSpacer.insert(0, "7")
 
 spacerCreateButton = customtkinter.CTkButton(master=spacerCreator, width=50, text="Create Spacer", command=lambda: sectionCreate(isEmpty=True))
 spacerCreateButton.grid(row=0, column=6, padx=5, pady=5)
@@ -2276,21 +2395,14 @@ viewer.tag_config("header", foreground="#ffffff", font=viewerTimeFont)          
 #Timelines. Where the currently selected JSON's timeline is displayed, and where the total YTT section view is displayed.
 timelines = tkinter.Canvas(
     app,
-    width=1000,
     height=300,
     bg="#202020", #Matching canvas with customtkinter color
     highlightthickness=0
 )
-timelines.grid(row=4, column=0, columnspan=3)
+timelines.grid(row=4, column=0, columnspan=3, sticky="ew")
 
 # Build the base timeline graphics at start of runtime (?)
-timelines.create_line(timelineMinx, jsonLine, timelineMaxx, jsonLine, fill="white")
-timelines.create_line(timelineMinx, jsonLine + timelineMark + 5, timelineMinx, jsonLine - timelineMark - 5, fill="white")
-timelines.create_line(timelineMaxx, jsonLine + timelineMark + 5, timelineMaxx, jsonLine - timelineMark - 5, fill="white")
-
-timelines.create_line(timelineMinx, yttLine, timelineMaxx, yttLine, fill="white")
-timelines.create_line(timelineMinx, yttLine + timelineMark + 5, timelineMinx, yttLine - timelineMark - 5, fill="white")
-timelines.create_line(timelineMaxx, yttLine + timelineMark + 5, timelineMaxx, yttLine - timelineMark - 5, fill="white")
+tracksDrawBase()
 
 leftHandTriangle = [(40, 100),(50, 90),(40, 80)] # Top, bottom right, bottom left vertices
 rightHandTriangle = [(960, 100),(950, 90),(960, 80)] # Top, bottom right, bottom left vertices
@@ -2373,15 +2485,18 @@ jsonData.append({
 # Keypress detection across the ENTIRE app for up, down, delete.
 app.bind("<KeyPress>", KeyPress)
 
-# Entry box keybinds:
-# Makes sure that typing in the section entry boxes
-# is reflected in the range slider.
+# Binds
 hourStart.bind("<KeyRelease>", rangeUpdateHandles)
 minStart.bind("<KeyRelease>", rangeUpdateHandles)
 secStart.bind("<KeyRelease>", rangeUpdateHandles)
 hourEnd.bind("<KeyRelease>", rangeUpdateHandles)
 minEnd.bind("<KeyRelease>", rangeUpdateHandles)
 secEnd.bind("<KeyRelease>", rangeUpdateHandles)
+timelines.bind("<Configure>", tracksOnResize)
+viewer.bind("<Configure>", viewerScrollOnResize)
+viewer.tag_bind("timestamp", "<Button-1>", viewerScrollOnTimestampClick)
+viewer.tag_bind("timestamp", "<Enter>", lambda e: viewer.configure(cursor="hand2"))
+viewer.tag_bind("timestamp", "<Leave>", lambda e: viewer.configure(cursor=""))
 
 #--------------------------------------------------------------------------
 # Cleanup
