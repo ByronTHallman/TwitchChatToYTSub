@@ -13,53 +13,65 @@ import re        # used to identify chatter name colors from the json (viewerPar
 import tkinter   # used for viewer module
 import tkinter.font as tkfont # monospace font for viewer module.
 
-from tkinter import filedialog, messagebox  # for imports and errors
 from datetime import datetime, timedelta    # importing time and date to get downloaded vod dates from first message.
+from tkinter import filedialog, messagebox  # for imports and errors
+from PIL import Image, ImageTk              # library for building the icon, conditional as don't really want this to bleed into the mac build
 from pathlib import Path                    # filepaths for tempfiles, json label fallbacks
 
 # Third Party Imports
 import customtkinter                            # the basis for this entire GUI
-from CTkRangeSlider import *                    # range sliders for
 from CTkToolTip import *                        # tooltips for shifter buttons!
+from CTkRangeSlider import *                    # range sliders for
 from tkinterdnd2 import DND_FILES, TkinterDnD   # for dragging and dropping files as import method
 from chat_downloader import ChatDownloader      # for downloading from twitch urls directly NOTE: SPECIFICALLY Indigo128's fork, as Xenova's does <<NOT>> work
 
 # Local Imports
 import yttconverter # export conversion process!
 
+# Media search is a work in progress, import if the file is present.
+try:
+    from tsg_mediasearch import initMediaSearch, mediaCheckUsername, mediaSearch
+    MEDIA_SEARCH_IMPORTED = True
+except ImportError:
+    MEDIA_SEARCH_IMPORTED = False
 '''     
     ================== COMPILING NOTES ==================
 
+    please first add to your python environment:
+        * tkinterdnd2, 
+        * pillow,
+        * indigo128's chatdownloader fork 
+
     NOTE:
-    * install tkinterdnd2 to your environment when building
+    * tkinterdnd2
     WIN: python -m pip install tkinterdnd2
         or
     MAC: python3 -m pip install tkinterdnd2
 
     NOTE:
-    * install pillow for icon compilation stuff
+    * pillow
     WIN: python -m pip install pillow
         or
     MAC: python3 -m pip install pillow
 
     NOTE:
-    For the ChatDownloader library, make sure to use Indigo128's fork.
-    If you've already tried installing it, run this:
+    For ChatDownloader library, MAKE SURE to use Indigo128's fork.
+    If you installed Xenova's ChatDownloader, run this:
         pip uninstall -y chat-downloader
+    Then run this:
         pip install git+https://github.com/Indigo128/chat-downloader.git@all_current_fixes
 
     NOTE FOR COMPILING:
     Compile with:
-    python -m PyInstaller --noconsole --onefile --collect-all customtkinter --collect-all chat_downloader --collect-all CTKRangeSlider --collect-all tkinterdnd2 --collect-all PIL --add-data "icons/icon.ico;icons" --icon=icons/icon.ico TwitchSubtitleGUI.py
-
-    or, for Mac
-    python3 -m PyInstaller --noconsole --onefile --collect-all customtkinter --collect-all chat_downloader --collect-all tkinterdnd2 --collect-all PIL --add-data "icons/icon.icns:icons" --icon=icons/icon.icns TwitchSubtitleGUI.py    
+    python -m PyInstaller --noconsole --onefile --collect-all customtkinter --collect-all chat_downloader --collect-all CTKRangeSlider --collect-all tkinterdnd2 --collect-all CTkToolTip --collect-all PIL --add-data "icons/icon.ico;icons" --icon=icons/icon.ico TwitchSubtitleGUI.py
+        or, for Mac
+    python3 -m PyInstaller --noconsole --onefile --collect-all customtkinter --collect-all chat_downloader --collect-all CTKRangeSlider --collect-all tkinterdnd2 --collect-all CTkToolTip --collect-all PIL --add-data "icons/icon.icns:icons" --icon=icons/icon.icns TwitchSubtitleGUI.py    
 
 '''
 
-#-------------------------------------------------------------------------------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------------------------------------------------------------------------------
 # Class Wrapper (to allow drag-and-drop) (if we decide we don't want this, very easy to remove, just reassign "app" class to customtkinter accordingly)
-#-------------------------------------------------------------------------------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------------------------------------------------------------------------------
 
 class CTkDnD(customtkinter.CTk, TkinterDnD.DnDWrapper):
 
@@ -67,9 +79,9 @@ class CTkDnD(customtkinter.CTk, TkinterDnD.DnDWrapper):
     super().__init__(*args, **kwargs)
     self.TkdndVersion = TkinterDnD._require(self)
 
-#--------------------------------------------------------------------------
-# Resources
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# Icon Resources
+# --------------------------------------------------------------------------
 
 def getIconPath(relativePath):
     try:
@@ -83,17 +95,25 @@ if sys.platform == "win32":
       "ttvsubgui.ttvsubgui.1"
   )
 
-'''
+# Prevent CTkTopLevel from overwriting inherited parent icons
+if hasattr(customtkinter.CTkToplevel, "_windows_set_titlebar_icon"):
+    customtkinter.CTkToplevel._windows_set_titlebar_icon = lambda self: None
 
-To update the icon file to a different png and not a dopey cat:
-generate an ".ico" file for  WIN: python -c "from PIL import Image; Image.open('icon.png').save('ico.ico')"    
+'''
+To update the icon file from a different png and not a dopey cat:
+
+Make ".ico" file for  WIN: 
+    python -c "from PIL import Image; Image.open('icons/icon.png').save('icons/ico.ico')"    
+
         or
-generate an ".icns" file for MAC: python3 -c "from PIL import Image; Image.open('icon.png').save('ico.icns')"
+
+Make ".icns" file for MAC: 
+    python3 -c "from PIL import Image; Image.open('icons/icon.png').save('icons/ico.icns')"
 '''
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Exceptions
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
 class EmptyChatError(Exception):
     """Raised when downloaded chat is evidently empty."""
@@ -103,28 +123,53 @@ class NonMediaError(Exception):
     """Raised when user attempts to download a Twitch user's profile page."""
     pass
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Startup Stuff
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
+# I guess we're hard coding a dark theme.
 customtkinter.set_appearance_mode("dark")
 customtkinter.set_default_color_theme("dark-blue")
 
-#NOTE: Updated the app class to "CTkDnD"
+#NOTE: Updated the app class to "CTkDnD" to allow drag and drop feature.
 app = CTkDnD()  # creates the window
 TkinterDnD.require(app) # for the class wrapper
 
 app.geometry("1000x800")
-app.resizable(True, True) #The timelines needed just a bit of encouragement
-app.title("TwitchChatSubber")
+app.resizable(True, True) #The timelines needed just a bit of encouragement. Resizing works now.
+
+# Adding a little midwest whimsy never hurts
+titleBits = ["How Do You Know It's Not Armadillo Shells?",
+             "Green Squirrel in Pretty Bad Shape",
+             "Monica Lewinskibidi",
+             "*Equip Sunglasses*",
+             "Feal Like Crab",
+             "My Dad Told Me To Write a Nice One For Nana So This Is It",
+             "This Software Is Called It's Called What's It Called",
+             "Smahccked My Head Awf",
+             "I Replied To Tyler With Three Blue Cars",
+             "The Soundtrack to Missing a Slam Dunk",
+             "I Don’t Think It’s the Right Time for Emojis",
+             "Slumdog Scungillionaire",
+             "Drink Milk and Run",
+             "If You Had Spun Out In Your Oldsmobile, This Probably Wouldn’t Have Happened",
+             "The Hammer Guy Is At It Again",
+             "I Hate the Gooey Disk",
+             "Pluto Was Never Really a Planet Either Even",
+             "Please Don’t Cry, You Have Swag",
+             "Mix Master Wade on the Beat",
+             "Visited Salmon, I Mean Transit Balcony"]
+
+titleBit = random.choice(titleBits) #very very important
+app.title(f"TwitchChatSubber   —   {titleBit}")
 app.focus_force()
 
+raw_icon = None
 # ICONS: Windows Icon
 if sys.platform == "win32":
-    from PIL import Image, ImageTk                      # library for building the icon, conditional as don't really want this to bleed into the mac build
-    #app.after(300, lambda: app.iconbitmap(getIconPath("icons/icon.ico")))
-    icon_path = getIconPath("icons/icon.ico")           # inshallah the icons will be baked into the executable at this point and takes it from there
+    icon_path = getIconPath("icons/icon.ico")           # executable icon will retain icon information
     app.iconbitmap(icon_path)                           # set windows taskbar icon
+    raw_icon = Image.open(icon_path).convert("RGBA")
     tk_icon = ImageTk.PhotoImage(Image.open(icon_path)) # uses pillow to convert .ico into an image object to prevent garbage collection
     app.iconphoto(True, tk_icon)                        # push imagetk thing into window manager icon slot
     app.after(250, lambda: app.iconbitmap(icon_path))   # safeguard
@@ -135,10 +180,22 @@ elif sys.platform == "darwin":
         COMPILED = getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS") # Not running from VSCode
         pathString = "icons/icon"
         pathString += ".icns" if COMPILED else ".png"
+        icon_path = getIconPath(pathString)
+        raw_icon = Image.open(icon_path).convert("RGBA")
         icon = tkinter.PhotoImage(file=getIconPath(pathString))
         app.after(250, lambda: app.iconphoto(True, icon))
+
     except Exception as e:
         print(f"Could not load macOS window icon: {e}")
+
+viewerIcon = None # Initialize the icon in case for some reason we don't have one.
+if raw_icon is not None:
+    watermark = raw_icon.resize((96, 96), Image.Resampling.LANCZOS)
+    r, g, b, a = watermark.split()
+    opacity = 0.6
+    faded = Image.merge("RGBA", (r, g, b, a.point(lambda px: int(px * opacity))))
+    dimmed = Image.alpha_composite(Image.new("RGBA", watermark.size, (32, 32, 32, 100)), faded)
+    viewerIcon = ImageTk.PhotoImage(dimmed)
 
 # Colors
 brightColors = [ # Some hand-picked OKLCH colors
@@ -159,7 +216,7 @@ currentJson = -1    # The index of the current JSON in jsonData
 
 # Section management global variables
 sections = []       # List of dictionaries. "jsonIndex", "start", "end", "button", "ogIndex", "color", "darkerColor"
-currentSection = 0  # The index of the current section in sectionList
+currentSection = -1  # The index of the current section in sectionList
 
 # Timeline and specific numeric global variables.
 timelineMinx = 50   # The lefthand side of the timelines.
@@ -171,6 +228,7 @@ yttLine = 240       # The y values of the output timeline.
 # Timeline slider global variables
 chatlogPlayheadValue = 0      # Global variable storing first timeline playhead value for access.
 outputPlayheadValue = 0       # Global variable storing second timeline playhead value for access.
+rangePlayheadValue = 0        # Global variable storing last move range slider handle value. Literally ony used when creating or updating a section to move to one of the ends.
 rangeSliderValues = {}        # Global dict storing keys assigned TRIPLES representing slider range left, right handle values AND slide ranger length.
 rangeSpacerDefaults = 300     # Fixed value of added 5 minutes (to set section size) for "ranges" to give spacers in order to make ranges useful when "selecting" the spacer "json". 12 hours still the actual max.
 
@@ -184,7 +242,7 @@ outputTimes = []             # Stores all OUTPUT message times, used for bisect 
 outputText = ""              # Cached text string
 outputRanges = {}            # Cached tag ranges
 outputStampWidth = 0         # Cached timestamp column width
-outputFirstRows = {}         # Cached tacks section starting times
+outputFirstRows = {}         # Cached tracks section starting times
 outputUseCache = False       # IF CALLED TRUE, tells viewerBuildOutput to use the above cached values or rebuild them from scratch.
 outputJumppoint = "playhead" # Determines whether user last touched Output timeline playhead, or sections shelf. Determines what Viewer displays when returning to Output mode.
 
@@ -207,13 +265,13 @@ viewerSection = -1                 # Index in sectionList of the selected sectio
 viewerOutputSection = -1           # hold on to the LAST KNOWN viewerSection for Output mode
 viewerSectionsOfSourceOnly = False # True = hide every message that isn't inside a section
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # ==== Functions Sections ======== #
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # ALL GENERAL HELPERS
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Helpers: Keypress input related
 
 # Keyboard Input
@@ -236,7 +294,7 @@ def callDown():
 def callDelete():
     app.event_generate("<Delete>")
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Helpers: Timestamp helpers
 
 # Converts params into seconds.
@@ -257,7 +315,7 @@ def helpSecToString(seconds):
         # If there are fractional seconds. Take off unnecessary zeroes from the right.
         return f"{hours:02}:{minutes:02}:{seconds:05.2f}".rstrip('0')
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Helpers: Timeline info getters
 
 # Returns the total time elapsed in the output file.
@@ -277,7 +335,7 @@ def getSectionStarts():
     starts.append(totalTime)
     return starts
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Helpers: Download related helpers
 
 # For tempfile management, extracts VOD ID for use as a backend label.
@@ -332,9 +390,9 @@ def downloaderCheckDuration(comments, duration):
     else:
         return duration
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # IMPORTS 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
 # If a card fails and disappears while another file is added, card positions need to be re-sorted
 # Otherwise large gaps appear
@@ -457,24 +515,41 @@ def importFileJSON(droppedFile=None):
 # this specific build of chat-downloader.
 # pip install git+https://github.com/Indigo128/chat-downloader.git@all_current_fixes
 
-def importDownloadURL():
+def importDownloadURL(urlPreset=None):
 
-    # Prompt user for URL
-    dialog = customtkinter.CTkInputDialog(
-            text="Paste the Twitch VOD URL below:",
-            title="Import Twitch VOD form URL"
-    )
+    if urlPreset is None:
+        # Prompt user for URL
+        dialog = customtkinter.CTkInputDialog(
+                text=
+                "Enter Twitch VOD URL below:\n\nOR\n\nEnter a username to browse:"
+                    if MEDIA_SEARCH_IMPORTED else 
+                "Enter Twitch VOD or Clip URL below:",
 
-    # Move the prompt a just below the button
-    app.update_idletasks() #ask app to finish what it's doing first
-    x = max(0, app.winfo_x() + 10)
-    y = max(0, app.winfo_y() + 120)
-    dialog.geometry(f"+{x}+{y}")
+                title="Download Chat from Twitch",
+                font=("Roboto", 15)
+        )
 
-    # Initiate the dialog process. Abort if nothing input or cancelled.
-    urlInput = dialog.get_input()
-    if urlInput is None:
-        return
+        # Move the prompt a just below the button
+        app.update_idletasks() #ask app to finish what it's doing first
+        x = max(0, app.winfo_x() + 10)
+        y = max(0, app.winfo_y() + 120)
+        dialog.geometry(f"+{x}+{y}")
+
+        # Initiate the dialog process. Abort if nothing input or cancelled.
+        urlInput = dialog.get_input()
+        if urlInput is None:
+            return
+
+        # Check if the input is actually a username.
+        if MEDIA_SEARCH_IMPORTED:
+            username = mediaCheckUsername(urlInput)
+            if username:
+                mediaSearch(username)
+                # If input is a username, abort and switch to downloader to media search mode.
+                return
+    else:
+        # Oh? Was something passed in? Take whatever is passed in.
+        urlInput = urlPreset
 
     # Separate out any URLs in case there are multiple!
     def parseURLs(vod_urls):
@@ -612,7 +687,7 @@ def importDownloadURL():
 
                 # Warn the user if the downloaded VOD has no comments,
                 # Unfortunate, but it does happen.
-                except EmptyChatError:
+                except EmptyChatError as error:
                     def EmptyChatException(card=urlCard, url=vod_url): # card destruction and queue manipulation in one tick for thread safety
                         if card in importState["pending"]:
                             importState["pending"].remove(card)
@@ -625,13 +700,25 @@ def importDownloadURL():
 
                 # Any other errors.
                 except Exception as error:
-                    def ExceptionUnknown(card=urlCard, url=vod_url): # card destruction and queue manipulation in one tick for thread safety
+                    # Inheriting exceptions from chat_downloader.errors
+                    def ExceptionDownloader(card=urlCard, url=vod_url, error=error): # card destruction and queue manipulation in one tick for thread safety
                         if card in importState["pending"]:
                             importState["pending"].remove(card)
                         card.destroy()                          # delete failed "Downloading..." card
                         importSortPending()
-                        messagebox.showerror("Import Failed for Unknown Reasons", f"Could not fetch chat from URL:\n{url}\n\n{type(error).__name__}: {error}")
-                    app.after(0, ExceptionUnknown)
+
+                        errorDict = {   "VideoUnavailable": "Video Does Not Exist",
+                                        "NoChatReplay" : "No Messages",
+                                        "VideoNotFound" : "Unresolvable Video ID",
+                                        "SiteNotSupported" : "Check your URL",
+                                        "RetriesExceeded" : "Rate Limited",
+                                        "ParsingError" : "Parser Broke",
+                                        "UserNotFound" : "Invalid URL Format"}
+                        
+                        errorType = errorDict.get(type(error).__name__, type(error).__name__)
+
+                        messagebox.showerror(f"Import Failed: {errorType}", f"Could not fetch chat from URL:\nhttp://www.{url}\n\n{error}")
+                    app.after(0, ExceptionDownloader)
                     importState["queue"].task_done()
                     continue
 
@@ -762,22 +849,33 @@ def importQueryJSON(imported_data, json_comments = []):
         'comments': json_comments
     }
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # EXPORT
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
 # The primary merging implementation, sends data to Berrin's converter and executes it.
 def exportYTT():
+
     if len(sections) == 0:
-        messagebox.showwarning("Export Error", "No sections have been added to the timeline.")
-        return
+        if len(jsonData) == 1:
+            messagebox.showwarning("Export Error", "No sources or sections.\n\nNothing to export!")
+            return
+        elif((currentJson != -1) and not (currentJson >= len(jsonData))):
+            ExportOnlySource = messagebox.askokcancel("Export Warning", "No sections created.\n\nExport selected source?")
+            name = f" - {(jsonData[currentJson].get("name") or "").replace("\n", " - ").replace("/", "-")}"
+            name = re.sub(r'[\\:*?"<>|\r]', "", name).strip(" .")   # ugh tedious getting rid of unsaveable characters
+            if ExportOnlySource == False:
+                return
+    else:
+        ExportOnlySource = False
+        name = ""
 
     # Ask the user for where to save the output and as what?
     output_path = filedialog.asksaveasfilename(
         title="Save YTT File As",
         defaultextension=".ytt",
         filetypes=[("YouTube TimedText files", "*.ytt"), ("All files", "*.*")],
-        initialfile="chat-to-subtitles.ytt"
+        initialfile=f"chat-to-subtitles{name}.ytt"
     )
 
     if not output_path:
@@ -796,32 +894,43 @@ def exportYTT():
     except ValueError:
         messagebox.showwarning(
             "Invalid Settings",
-            "Please enter a valid font size and comment duration."
+            "Please use a non-negative font size and comment duration."
         )
         return
 
-    # Assemble the data for the backend in the exact order of sectionList
-    ordered_sections = []
-    for section in sections:
-        json_index = section["jsonIndex"]
-        file_path = jsonData[json_index]["path"]
-        
-        ordered_sections.append({
-            "path": file_path,
-            "start": section["start"],
-            "end": section["end"]
-        })
+    # Prepare space to load sections or source into.
+    output = []
+
+    if ExportOnlySource:
+        # Assemble only current source data if exporting without sources.
+        file_path = jsonData[currentJson]["path"]
+        output.append({
+                "path": file_path,
+                "start": 0,
+                "end": jsonData[currentJson]["endTime"]
+            })
+    else:
+        # Assemble the data for the backend in the exact order of sectionList
+        for section in sections:
+            json_index = section["jsonIndex"]
+            file_path = jsonData[json_index]["path"]
+            
+            output.append({
+                "path": file_path,
+                "start": section["start"],
+                "end": section["end"]
+            })
 
     # Hand the ordered list directly to Berrin's module
     try:
-        yttconverter.generate_ytt(ordered_sections, output_path, comment_font=comment_font, font_size=font_size, comment_opacity=comment_opacity, comment_duration=comment_duration)
+        yttconverter.generate_ytt(output, output_path, comment_font=comment_font, font_size=font_size, comment_opacity=comment_opacity, comment_duration=comment_duration)
         messagebox.showinfo("Success", f"YTT file generated successfully!\nSaved to: {output_path}")
     except Exception as error:
         messagebox.showerror("Export Failed", f"An error occurred during conversion:\n{error}")
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # CHATLOG SOURCE MANAGEMENT
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
 def jsonHighlight():
     for i, entry in enumerate(jsonData):
@@ -835,7 +944,7 @@ def jsonHighlight():
 #Change 11/8/26: SelectJson now also tells the viewer which chatlog to show.
 #Renamed to jsonSelect
 def jsonSelect(index):
-    global currentJson, viewerSection
+    global currentJson, currentSection, viewerSection
 
     # Take current range slider handles to tuples and assign to dict with currentJson as key before reassignment
     rangeManagement(index)
@@ -843,6 +952,11 @@ def jsonSelect(index):
     # Assign new current JSON
     currentJson = index
     jsonHighlight()
+
+    # Wipe current section selection, 
+    # prevents user from updating sections to new sources; while not a bug muddies sectionUpdate's purposes
+    currentSection = -1
+    sectionHighlight()
     
     rangeSourceTitle.configure(text="Current Source: " + jsonData[currentJson]["name"])
 
@@ -853,9 +967,9 @@ def jsonSelect(index):
     print("jsonSelect")
 
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # CHAT VIEWER
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # A scrollable list: timestamp on the left, 
 # then the colored name and the message. 
 # Section text is highlighted as a block.
@@ -1098,6 +1212,22 @@ def viewerRender(scrollTo="top", isEmpty=False):
 
     # == IF OUTPUT MODE ==
     if isOutput:
+        if not sections:    # Prevent viewer from printing "No sections in output timeline" by just switching modes
+            viewer.configure(state="normal")
+            viewer.delete("1.0", "end")
+            if len(jsonData) > 1:
+                viewer.insert("1.0", "No sections in output timeline.")
+
+                # Something here? Your job is done, cat.
+                if viewerPlaceholder:
+                    viewerPlaceholder.place_forget()
+
+            # Nothing here? Place the funny cat.
+            elif viewerPlaceholder:
+                viewerPlaceholder.place(relx=0.5, rely=0.5, anchor="center")
+            
+            viewer.configure(state="disabled")
+            return
         viewerBuildOutputRows()  # Does nothing if outputUseCache is True, otherwise BUILD ROWS.
         text = outputText
         ranges = outputRanges
@@ -1140,6 +1270,9 @@ def viewerRender(scrollTo="top", isEmpty=False):
         viewer.tag_config("sec" + str(sectionListIndex), background=section["darkerColor"], foreground="#ffffff")
 
     # == INSERT TEXT INTO VIEWER ==
+    # Cat please go.
+    if viewerPlaceholder:
+        viewerPlaceholder.place_forget()
     viewer.insert("1.0", text)
     viewer.tag_add("hang", "1.0", "end") # Apply hang tag to everything?
 
@@ -1395,9 +1528,9 @@ def viewerFontReset():
     else:
         viewerUpdateFont(fontOption.get())
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # SECTIONS
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
 def sectionIsSpacer():
     if currentJson > -1 and jsonData[currentJson].get("path") == None:
@@ -1517,6 +1650,12 @@ def sectionCreate(isEmpty=False):
     print(f"gonna select {len(sections) - 1}")
     sectionSelect(len(sections) - 1, isEmpty=isEmpty) #if not isEmpty else None #Note: Len makes a list of 1 object have a len value of 1
 
+    # Makes it so that we jump to wherever the playhead is instead of just the section start
+    # Occurred to me as it seemed annoying that I would move the right range playhead, create, and it forces the viewer back to the beginning of the section
+    # TODO: Possible edge case to consider: Changing entry boxes does not update rangePlayheadValue. Could cause issues.
+    if viewerModeButtons.get() != "Output Preview":
+        viewerScroll(rangePlayheadValue)
+
 def sectionSelect(index, isEmpty=False):
     global currentSection, currentJson, viewerSection
     global outputUseCache, outputJumppoint
@@ -1600,14 +1739,14 @@ def sectionDelete(index):
         return
 
     sections[index]["button"].destroy() # eliminate section visual
-    sections.pop(index)              # eliminate section data
+    sections.pop(index)                 # eliminate section data
 
     for i, section in enumerate(sections):
         section["button"].configure(command=lambda target=i: sectionSelect(target))
         section["button"].grid(row=i + 1)
 
     if not sections:
-        currentSection = 0
+        currentSection = -1
         viewerSection = -1
         sectionHighlight()
         tracksRedraw()
@@ -1620,27 +1759,23 @@ def sectionDelete(index):
 def sectionUpdate(isSpacer=False):
     global currentJson, outputUseCache
 
-    if not sections or not (0 <= currentSection < len(sections)):
+    if not sections or not (-1 < currentSection < len(sections)):
         return
 
     if sectionIsSpacer():
         isSpacer= True
 
-    target = sections[currentSection]
-    target_is_spacer = (target["jsonIndex"] == 0)
+    # Previous guard means currentSection MUST be in sections bound
+    targetSection = sections[currentSection]
 
-    # Guard against updating a spacer with section controls (or vice versa)
-    # No longer applicable to current implementation
-    #if isSpacer != target_is_spacer:
-        #return
-
+    # Hold onto current source if a spacer is selected
     tempCurrentJson = currentJson
     if isSpacer:
         currentJson = 0
         targetJson = 0
     else:
         # Use the currently active chatlog, or keep the section's original chatlog if on Spacer/none
-        targetJson = currentJson if currentJson > 0 else target["jsonIndex"]
+        targetJson = currentJson if currentJson > 0 else targetSection["jsonIndex"]
         currentJson = targetJson
 
     try:
@@ -1671,10 +1806,10 @@ def sectionUpdate(isSpacer=False):
         return
 
     # Update the section dictionary and its button label in sectionShelf
-    target["jsonIndex"] = targetJson
-    target["start"] = start
-    target["end"] = end
-    target["button"].configure(
+    targetSection["jsonIndex"] = targetJson
+    targetSection["start"] = start
+    targetSection["end"] = end
+    targetSection["button"].configure(
         text=f"{currentSection + 1} - {jsonData[targetJson]['name']}\n{helpSecToString(start)} - {helpSecToString(end)}"
     )
 
@@ -1683,9 +1818,15 @@ def sectionUpdate(isSpacer=False):
     tracksRedraw()
     viewerRender(scrollTo="section")
 
-#--------------------------------------------------------------------------
+    # Makes it so that we jump to wherever the playhead is instead of just the section start
+    # Occurred to me as it seemed annoying that I would move the right range playhead, update, and it forces the viewer back to the beginning of the section
+    # TODO: Possible edge case to consider: Changing entry boxes does not update rangePlayheadValue. Could cause issues.
+    if viewerModeButtons.get() != "Output Preview":
+        viewerScroll(rangePlayheadValue)
+
+# --------------------------------------------------------------------------
 # RANGE EDITOR SLIDER FUNCTIONS
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
 def rangeStore(rangeSlider, index):
     values = rangeSlider.get() or [0, 100] #default to [0, 100] if range isn't stored
@@ -1813,7 +1954,7 @@ def rangeUpdateSpacer():
 # Initiates changes to the entry boxes
 # depending on range slider positions
 def rangeSliderDragged(sliderValue, side):
-    global chatlogPlayheadValue
+    global chatlogPlayheadValue, rangePlayheadValue
 
     # If in output, activate last used chatlog mode
     if viewerModeButtons.get() == "Output Preview":
@@ -1827,6 +1968,7 @@ def rangeSliderDragged(sliderValue, side):
     rangeMoveMarker(sliderValue, side)
     
     chatlogPlayheadValue = sliderValue
+    rangePlayheadValue = sliderValue
 
     if currentJson == -1: #or sliderMax == 0:
         return
@@ -1883,9 +2025,9 @@ def rangeUpdateHandles(event=None):
     except ValueError:
         pass # Ignore incomplete/invalid typing.
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # TIMELINES
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
 def tracksDrawBase():
     timelines.delete("base")
@@ -2067,9 +2209,9 @@ def tracksRedraw():
         # Maybe this call flow should be moved somewhere else, alas.
     sectionTotalTime.configure(text=f"Total Time: {helpSecToString(getYTTDuration())}")
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # SETTINGS
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
 def settingsOpen():
     # Force Tkinter to finish what it's doing
@@ -2090,8 +2232,9 @@ def settingsOpen():
                 break
 
     # move popup somewhere relevant
-    x = app.winfo_x() + 700
-    y = app.winfo_y() + 125
+
+    x = settingsButton.winfo_rootx() + -25
+    y = settingsButton.winfo_rooty() + 35
     settingsWindow.geometry(f"+{x}+{y}")
 
     # Reveal the window
@@ -2101,9 +2244,9 @@ def settingsOpen():
     settingsWindow.after(50, settingsWindow.lift)
     settingsWindow.after(50, settingsWindow.focus_force)
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 #----------------------------- INITIALIZE UI ------------------------------
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 #Defining general App sections. leftSide, sectionEditor
 app.grid_rowconfigure(0, weight=0)
 app.grid_rowconfigure(1, weight=1)
@@ -2120,7 +2263,7 @@ rightSide = customtkinter.CTkFrame(master=app, width=275)
 rightSide.grid(row=0, column=2, rowspan=2, padx=10, pady=10, sticky="nsew")
 rightSide.grid_propagate(False)
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # leftSide. Importing and JSON visualizer.
 # leftSide = customtkinter.CTkFrame(master=app)
 # leftSide.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
@@ -2128,12 +2271,12 @@ leftSide.grid_columnconfigure(0, weight=1)
 leftSide.grid_rowconfigure(2, weight=1)
 
 # importJSON. Prompts user to import JSON files.
-importJSON = customtkinter.CTkButton(master=leftSide, text="Import by File", font = ("Roboto", 13), command=importFileJSON)
-importJSON.grid(row=0, column=0, padx=5, pady=5, sticky="new")
+importJSONButton = customtkinter.CTkButton(master=leftSide, text="Import by File", font = ("Roboto", 13), command=importFileJSON)
+importJSONButton.grid(row=0, column=0, padx=5, pady=5, sticky="new")
 
 # importURL. Prompts user to enter a URL to download directly from a Twitch VOD link.
-importDownloadURL = customtkinter.CTkButton(master=leftSide, text="Import by URL", font = ("Roboto", 13), command=importDownloadURL, fg_color="#7a2b2b", hover_color="#5c1e1e")
-importDownloadURL.grid(row=1, column=0, padx=5, pady=5, sticky="new")
+importURLButton = customtkinter.CTkButton(master=leftSide, text=f"Import by URL or Channel" if MEDIA_SEARCH_IMPORTED else "Import by URL", font = ("Roboto", 13), command=importDownloadURL, fg_color="#7a2b2b", hover_color="#5c1e1e")
+importURLButton.grid(row=1, column=0, padx=5, pady=5, sticky="new")
 
 # Contains list of all the chatlogs
 # Change: renamed this to "shelf" because visualizer too confusingly similar to viewer
@@ -2145,7 +2288,7 @@ jsonShelfTitle.grid(row=0, column=0, padx=1, pady=(1, 10), sticky="ew")
 jsonShelfTitle.configure(font = ("Roboto", 15))
 jsonShelf.grid(row=2, column=0, rowspan=2, padx=5, pady=5, sticky="nsew")
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 #rightSide. Export and section editor.
 #rightSide = customtkinter.CTkFrame(master=app)
 #rightSide.grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
@@ -2195,7 +2338,7 @@ shiftDownTooltip = CTkToolTip(shiftDownButton, follow=True, alpha=0.8, delay=0, 
 shiftDeleteTooltip = CTkToolTip(shiftDeleteButton, follow=True, alpha=0.8, delay=0, x_offset=-50, y_offset=-40, message="Delete Section")
 shiftUpdatepTooltip = CTkToolTip(shiftUpdateButton, follow=True, alpha=0.8, delay=0, x_offset=-50, y_offset=-40, message="Update Section")
 
-#----------------------------------------------------------------------------------------------
+# ----------------------------------------------------------------------------------------------
 #subtitle settings
 
 settingsWindow = customtkinter.CTkToplevel(app)
@@ -2255,13 +2398,13 @@ durationOptions.grid(row=4, column=0, padx=(0, 8), pady=(2, 6), sticky="w")
 
 settingsWindow.resizable(False, False)
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 #rangeBox. Where the user adds a new JSON section to the sectionEditor.
 #Change: sectionAdder to rangeBox
 rangeBox.grid_columnconfigure(0, weight=1)
 rangeBox.grid_propagate(False)
 
-rangeTitle = customtkinter.CTkLabel(master = rangeBox, text="Create Subtitle Section")
+rangeTitle = customtkinter.CTkLabel(master = rangeBox, text="➜  ➜  ➜     Create Subtitle Section     ➜  ➜  ➜")
 rangeTitle.grid(row=0, column=0, padx=0, pady=(5, 0), sticky="nsew")
 rangeTitle.configure(font = ("Roboto", 15))
 
@@ -2332,7 +2475,7 @@ secSpacer.insert(0, "7")
 spacerCreateButton = customtkinter.CTkButton(master=spacerCreator, width=50, text="Create Spacer", command=lambda: sectionCreate(isEmpty=True))
 spacerCreateButton.grid(row=0, column=6, padx=5, pady=5)
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 #Middle Section Scroller. The chatlog viewer. Its scrollbar is its own and is NOT connected to any slider as of right now.
 viewerFrame = customtkinter.CTkFrame(master=app)
 viewerFrame.grid(row=1, column=1, padx=10, pady=(0, 10), sticky="nsew")
@@ -2371,6 +2514,7 @@ viewer = tkinter.Text(
     font=viewerFont,
     bg="#202020",
     fg="#ffffff",
+    selectbackground="#232841",
     borderwidth=0,
     highlightthickness=0,
     padx=8,
@@ -2391,7 +2535,36 @@ viewer.tag_config("hang", lmargin2=viewerFont.measure("0") * (outputStampWidth +
 viewer.tag_config("active_highlight", background="#0a0a0a")                         # Tag for highlighted messages under scroll
 viewer.tag_config("header", foreground="#ffffff", font=viewerTimeFont)              # Tag for output mode "section start" headers
 
-#--------------------------------------------------------------------------
+
+
+viewerPlaceholder = None
+viewerPlaceholderTooltip = None
+if viewerIcon is not None:
+    viewerPlaceholder = tkinter.Label(
+        viewer,
+        image=viewerIcon,
+        text=f"Import something!\n\nPlease?",
+        compound="top",
+        pady=8,
+        fg="#888888",
+        bg="#202020",
+        font=("Roboto", 13),
+        borderwidth=1,
+        highlightthickness=0
+    )
+    viewerPlaceholder.place(relx=0.5, rely=0.5, anchor="center")
+    viewerPlaceholderTooltip = CTkToolTip(
+        viewerPlaceholder,
+        follow=True,
+        corner_radius=0,
+        alpha=0.5,
+        delay=0.5,
+        x_offset=-40,
+        y_offset=-45,
+        message=f"Hey, buddy, try just \"importing\" a username. Yeah. Trust me. No, like, seriously. Where are you going? Come back." if MEDIA_SEARCH_IMPORTED else "What? Did you expect I'd say something profound or helpful? I'm a cat."
+    )
+
+# --------------------------------------------------------------------------
 #Timelines. Where the currently selected JSON's timeline is displayed, and where the total YTT section view is displayed.
 timelines = tkinter.Canvas(
     app,
@@ -2468,9 +2641,9 @@ timelinesOutputSlider = customtkinter.CTkSlider(
     command=lambda val: tracksOutputDragged())
 timelinesOutputSlider.place(x=43, y=252), timelinesOutputSlider.set(0)
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # INITIALIZE IMPORTS
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 #Things to do when the app starts
 #importEmptyJSON()
 # Create empty jsonData block
@@ -2498,7 +2671,7 @@ viewer.tag_bind("timestamp", "<Button-1>", viewerScrollOnTimestampClick)
 viewer.tag_bind("timestamp", "<Enter>", lambda e: viewer.configure(cursor="hand2"))
 viewer.tag_bind("timestamp", "<Leave>", lambda e: viewer.configure(cursor=""))
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Cleanup
 # Manually delete the tempfiles... Not entirely sure if this is necessary.
 def cleanup():
@@ -2516,5 +2689,7 @@ tracksRedraw()
 app.drop_target_register(DND_FILES)
 app.dnd_bind("<<Drop>>", importFileDrop)
 
-#--------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+if MEDIA_SEARCH_IMPORTED:
+    initMediaSearch(app, importDownloadURL, helpSecToString)
 app.mainloop()  # Called at the end.
