@@ -123,6 +123,10 @@ class NonMediaError(Exception):
     """Raised when user attempts to download a Twitch user's profile page."""
     pass
 
+class ZeroLengthError(Exception):
+    """Raised when a chat file has no concept of time."""
+    pass
+
 # --------------------------------------------------------------------------
 # Startup Stuff
 # --------------------------------------------------------------------------
@@ -253,7 +257,9 @@ importState = {             # Holds state for queued URL downloads
                                     # False: No current download; True: There is a download happening
     "lock": threading.Lock(),   # Prevent simultaneous changes to the running flag
                                     # Unlocked: Safe to change "running" state; Locked: Another thread checking "running"
-    "pending": []}              # List of placeholder CTkButton cards
+    "pending": [],              # List of placeholder CTkButton cards
+    "cancelled": []             # List of cancelled buttons for downloaderLoop to skip/abort
+    }
 
 # Tempfile global variables
 tempDownloads = [] #Any file downloaded by URL will be added to this list to be removed on shutdown
@@ -409,7 +415,7 @@ def importFileDrop(event):
         if droppedFile.lower().endswith(".json"):
             importFileJSON(droppedFile)
         else:
-            messagebox.showerror("Import failed", f"Please drop a valid Twitch JSON chat log.",)
+            messagebox.showerror("Import Failed", f"Please drop a valid Twitch JSON chat log.",)
 
 #Opens JSON file picker, imports, and adds data to jsonData
 def importFileJSON(droppedFile=None):
@@ -465,7 +471,7 @@ def importFileJSON(droppedFile=None):
                 imported_data = json.load(json_file)
         except (OSError, json.JSONDecodeError) as error:
             # Delete "Importing..."" card if import fails to read.
-            messagebox.showerror("Import failed", f"Could not load this JSON file:\n{error}")
+            messagebox.showerror("Import Failed", f"Could not load this JSON file:\n{error}")
             app.after(0, jsonCard.destroy)
             continue
 
@@ -476,34 +482,43 @@ def importFileJSON(droppedFile=None):
         json_label = f"{json_metadata['streamer']}, {json_metadata['date']}\nGame: {json_metadata['game']}"
         duration = json_metadata.get('duration', 0)
 
-        # Warn the user if the chatlog is devoid of comments, but let them use it if they want to for some ungodly reason.
-        if json_metadata.get('comments') == []:
-            json_label += ", WARNING: EMPTY"
-            app.after(0, lambda: messagebox.showwarning("Import Warning", f"No messages found for this file."))
+        try: # Reject zero-length logs, typical sign of malformed JSON.
+            if duration == 0:
+                raise EmptyChatError
 
-        # If some data is missing, fallback to filename.
-        if(not (json_metadata['streamer'] or json_metadata['game'] or json_metadata['date'])):
-            json_label = Path(filePath).stem
+            # Warn the user if the chatlog is devoid of comments, but let them use it if they want to for some ungodly reason.
+            if json_metadata.get('comments') == []:
+                json_label += ", WARNING: EMPTY"
+                app.after(0, lambda: messagebox.showwarning("Import Warning", f"No messages found for this file."))
 
-        # Attach this JSON to the chain of chatlog information.
-        jsonData.append({"path":filePath, "name":json_label, "endTime":duration, "button": jsonCard})
-        jsonCard.grid(row=len(jsonData) - 1, column=0, padx=5, pady=2, sticky="ew")
-        importSortPending()
+            # If some data is missing, fallback to filename.
+            if(not (json_metadata['streamer'] or json_metadata['game'] or json_metadata['date'])):
+                json_label = Path(filePath).stem
 
-        # Update "Importing..." card to reflect the JSON's info.
-            # "jsonData" as a list of dicts, containing: 
-            # filepath, vod label, length, comments 
-            # "comments" as list of dicts, containing commenter, messages, and content_offset_seconds
-        jsonCard.configure(
-            text=str(len(jsonData)-1)
-            + " - " + jsonData[-1]["name"]
-            + "\nDuration: "
-            + "("
-            + str(timedelta(seconds=duration)) + ")",
-            state="normal",
-            fg_color="#1f538d", hover_color="#14375e",
-            command=lambda index=len(jsonData) - 1: jsonSelect(index)
-        )
+            # Attach this JSON to the chain of chatlog information.
+            jsonData.append({"path":filePath, "name":json_label, "endTime":duration, "button": jsonCard})
+            jsonCard.grid(row=len(jsonData) - 1, column=0, padx=5, pady=2, sticky="ew")
+            importSortPending()
+
+            # Update "Importing..." card to reflect the JSON's info.
+                # "jsonData" as a list of dicts, containing: 
+                # filepath, vod label, length, comments 
+                # "comments" as list of dicts, containing commenter, messages, and content_offset_seconds
+            jsonCard.configure(
+                text=str(len(jsonData)-1)
+                + " - " + jsonData[-1]["name"]
+                + "\nDuration: "
+                + "("
+                + str(timedelta(seconds=duration)) + ")",
+                state="normal",
+                fg_color="#1f538d", hover_color="#14375e",
+                command=lambda index=len(jsonData) - 1: jsonSelect(index)
+            )
+        except EmptyChatError as error:
+            app.after(0, jsonCard.destroy)
+            messagebox.showerror("Import Failed", "Imported file has invalid time data.")
+            continue
+
         app.update_idletasks()
 
     if len(jsonData) > 1:
@@ -577,13 +592,40 @@ def importDownloadURL(urlPreset=None):
         importState["pending"].append(urlCard)
 
         if len(importState["pending"]) > 1:
-            urlCard.configure(text="Download Queued...")
+            urlCard.configure(text="Download\nQueued...")
 
         # Place card in jsonShelf appropriate row
         urlCard.grid(row=(len(jsonData) - 1) + len(importState["pending"]), column=0, padx=5, pady=2, sticky="ew")
 
+        # Cancel button destroys its parent card.
+        def onCancel(card=urlCard):
+            if card not in importState["cancelled"]:
+                importState["cancelled"].append(card)
+            if card in importState["pending"]:
+                importState["pending"].remove(card)
+            if card.winfo_exists():
+                card.destroy()
+            importSortPending()
+
+        # Little button to cancel a download.
+        cancelCard = customtkinter.CTkButton(
+            master=urlCard,
+            text="âœ•",
+            width=12,
+            height=12,
+            font=("Roboto", 8),
+            corner_radius=3,
+            border_spacing=0,
+            fg_color="#644040",
+            hover_color="#5c1e1e",
+            bg_color="#644040",
+            command=onCancel
+        )
+        cancelCard.place(relx=1.0, rely=0.0, anchor="ne", x=-4, y=4)
+        cancelCard.lift()
+
         # Add current card to queue of downloads
-        importState["queue"].put((url, urlCard))
+        importState["queue"].put((url, urlCard, cancelCard))
 
     # Initiate downloader loop only if one isn't already running
     with importState["lock"]:
@@ -596,16 +638,22 @@ def importDownloadURL(urlPreset=None):
         try:
             while True:                 # Keep going until empty queue
                 try:
-                    vod_url, urlCard = importState["queue"].get_nowait()
+                    vod_url, urlCard, cancelCard = importState["queue"].get_nowait()
                 except queue.Empty:
                     with importState["lock"]:
                         if importState["queue"].empty():
-                            importState["running"] = False  #race condition garbage
+                            importState["running"] = False
                             break
                     continue
 
+                    # End download task for cancelled downloads. 
+                if urlCard in importState["cancelled"]:
+                    importState["cancelled"].remove(urlCard)
+                    importState["queue"].task_done()
+                    continue
+
                 # Update next-up card
-                app.after(0, lambda card=urlCard: card.configure(text="Downloading...\n0%"))
+                app.after(0, lambda card=urlCard: card.configure(text="Downloading...\n0%") if card not in importState["cancelled"] and card.winfo_exists() else None)
                 
                 try:
                     # == DOWNLOAD GENERATOR INIT ==
@@ -644,6 +692,9 @@ def importDownloadURL(urlPreset=None):
                     downloadedComments = [downloaderFormatComment(first_message)]
                     lastPercent = -1
                     for vod_message in vod_chat:
+                        if urlCard in importState["cancelled"]:
+                            break
+
                         # Formatted comment info, get time for %
                         comment = downloaderFormatComment(vod_message)
                         time = comment.get("content_offset_seconds")
@@ -657,7 +708,13 @@ def importDownloadURL(urlPreset=None):
                         if percent != lastPercent:
                             lastPercent = percent
                             # Change to app.after for thread safety, .configure from background thread is not thread safe
-                            app.after(0, lambda card=urlCard, percent=percent: card.configure(text=f"Downloading...\n{percent}%"))
+                            app.after(0, lambda card=urlCard, percent=percent: card.configure(text=f"Downloading...\n{percent}%") if card not in importState["cancelled"] and card.winfo_exists() else None)
+
+                    # End download task for cancelled downloads. 
+                    if urlCard in importState["cancelled"]:
+                        importState["cancelled"].remove(urlCard)
+                        importState["queue"].task_done()
+                        continue
 
                     # == CHECK FOR WEIRD TIMES ==
                     # For some reason, some VODs have messages LATER 
@@ -731,10 +788,23 @@ def importDownloadURL(urlPreset=None):
                     # "comments" as list of dicts, containing commenter, messages, and content_offset_seconds
 
                 # Params changed to be explicit to capture current loop's variables
-                def update_ui(card=urlCard, path=vod_tempfile, name=vod_label, duration=vod_duration, comments=downloadedComments):
+                def update_ui(card=urlCard, path=vod_tempfile, name=vod_label, duration=vod_duration, comments=downloadedComments, cancelCard=cancelCard):
                     try:
-                        if card in importState["pending"]: # Don't crash if there's no card to remove
-                            importState["pending"].remove(card)
+                        # Was a card deleted at the last second? Clean up then.
+                        if card in importState["cancelled"] or not card.winfo_exists():
+                            if card in importState["cancelled"]:
+                                importState["cancelled"].remove(card)
+                            return
+        
+                        # Successful download? Get rid of the cancel button.
+                        if cancelCard.winfo_exists():
+                            cancelCard.destroy()
+
+                        # Successful download? Clean pending list.
+                        if card in importState["pending"]: # Don't crash if there's no card to remove from pending list
+                            importState["pending"].remove(card) # Remove completed download from pending list
+
+                        # Update jsonData list.
                         jsonData.append({"path": path, "name": name, "endTime": duration, "comments": comments, "button": card})
                         
                         # Index of current card
@@ -2330,14 +2400,25 @@ shiftUpdateButton = customtkinter.CTkButton(master=sectionShifterFrame, text="âœ
 shiftUpdateButton.grid(row=0, column=3, padx=3, pady=5, sticky="ns")
 
 # Tooltips (differences to account for bugginess on mac)
-tooltipDelay = 0.05 if sys.platform == "darwin" else 0
-tooltipRadius = 0 if sys.platform == "darwin" else 6
+tipFollow = False if sys.platform == "darwin" else True
+tipDelay = 0.1 if sys.platform == "darwin" else 0
+tipRadius = 0 if sys.platform == "darwin" else 6
 
-shiftUpTooltip = CTkToolTip(shiftUpButton, follow=True, alpha=0.8, delay=0, x_offset=-50, y_offset=-40, message="Move Section Up")
-shiftDownTooltip = CTkToolTip(shiftDownButton, follow=True, alpha=0.8, delay=0, x_offset=-50, y_offset=-40, message="Move Section Down")
-shiftDeleteTooltip = CTkToolTip(shiftDeleteButton, follow=True, alpha=0.8, delay=0, x_offset=-50, y_offset=-40, message="Delete Section")
-shiftUpdatepTooltip = CTkToolTip(shiftUpdateButton, follow=True, alpha=0.8, delay=0, x_offset=-50, y_offset=-40, message="Update Section")
+toolTips = {shiftUpButton : "Move Section Up",
+                   shiftDownButton : "Move Section Down",
+                   shiftDeleteButton : "Delete Section",
+                   shiftUpdateButton : "Update Section"}
 
+# Map tooltips
+for button, tip in toolTips.items():
+    CTkToolTip(button, 
+               corner_radius=tipRadius, 
+               follow=tipFollow, 
+               delay=tipDelay, 
+               alpha=0.8, x_offset=-50, 
+               y_offset=-40, 
+               message=tip)
+    
 # ----------------------------------------------------------------------------------------------
 #subtitle settings
 
@@ -2534,8 +2615,6 @@ viewer.tag_config("out", foreground="#8a8a8a")                                  
 viewer.tag_config("hang", lmargin2=viewerFont.measure("0") * (outputStampWidth + 2))  # Tag to define distance from the left side
 viewer.tag_config("active_highlight", background="#0a0a0a")                         # Tag for highlighted messages under scroll
 viewer.tag_config("header", foreground="#ffffff", font=viewerTimeFont)              # Tag for output mode "section start" headers
-
-
 
 viewerPlaceholder = None
 viewerPlaceholderTooltip = None
