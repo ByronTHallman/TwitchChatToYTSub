@@ -1,0 +1,7 @@
+# External
+pillow
+tkinterdnd2
+git+https://github.com/Indigo128/chat-downloader.git@all_current_fixes
+
+# Local
+-e ./CustomTkinter-master
